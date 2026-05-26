@@ -1,4 +1,4 @@
-name: Build JCG Q30 Pro ImmortalWrt 25.12
+name: Build JCG Q30 (Custom U-Boot) 25.12
 
 on:
   workflow_dispatch: # 允许手动点击按钮触发编译
@@ -36,10 +36,17 @@ jobs:
       working-directory: ./openwrt
       run: |
         cat > .config <<EOF
-        # 设置平台与机型
         CONFIG_TARGET_mediatek=y
+        
+        # 兼容 mt798x sdk 树结构
         CONFIG_TARGET_mediatek_mt7981=y
-        CONFIG_TARGET_mediatek_mt7981_DEVICE_jcg_q30-pro=y
+        CONFIG_TARGET_mediatek_mt7981_DEVICE_jcg_q30=y
+        CONFIG_TARGET_mediatek_mt7981_DEVICE_jcg_q30-ubootmod=y
+        
+        # 兼容 filogic 主线树结构
+        CONFIG_TARGET_mediatek_filogic=y
+        CONFIG_TARGET_mediatek_filogic_DEVICE_jcg_q30=y
+        CONFIG_TARGET_mediatek_filogic_DEVICE_jcg_q30-ubootmod=y
         
         # 基础 LuCI 界面与中文语言包
         CONFIG_PACKAGE_luci=y
@@ -59,7 +66,7 @@ jobs:
         CONFIG_PACKAGE_ip-full=y
         EOF
         
-        # 自动补全依赖配置
+        # 自动补全依赖并清理无用的占位符
         make defconfig
 
     - name: 下载所需依赖包
@@ -82,5 +89,5 @@ jobs:
     - name: 上传固件到 GitHub 供下载
       uses: actions/upload-artifact@v4
       with:
-        name: ImmortalWrt-JCG_Q30_Pro-25.12-Firmware
+        name: ImmortalWrt-JCG_Q30-CustomUBoot-25.12
         path: ${{ env.FIRMWARE }}/*
