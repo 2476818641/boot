@@ -1,93 +1,125 @@
-name: Build JCG Q30 (Custom U-Boot) 25.12
+name: Build JCG Q30 Series (25.12)
 
 on:
-  workflow_dispatch: # 允许手动点击按钮触发编译
+  workflow_dispatch: # 允许手动点击运行
 
 jobs:
   build:
+    name: Build ${{ matrix.DEVICE_PROFILE }}
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # 矩阵编译：同时运行两个机型
+        DEVICE_PROFILE: [jcg_q30, jcg_q30-pro]
 
     steps:
     - name: 检出仓库代码
       uses: actions/checkout@v4
 
-    - name: 准备编译环境
+    - name: 释放磁盘空间并准备环境
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
         sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
         sudo docker image prune --all --force
         sudo -E apt-get -qq update
-        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools libpython3-dev qemu-utils rs rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-setuptools python3-wheel libpython3-dev qemu-utils rs rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
 
-    - name: 拉取源码 (chasey-dev 25.12分支)
+    - name: 拉取源码 (chasey-dev 25.12)
       run: |
-        git clone -b 25.12 https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git openwrt
+        git clone -b 25.12 --depth 1 https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git openwrt
 
-    - name: 更新及安装 Feeds 插件包
+    - name: 更新及安装 Feeds
       working-directory: ./openwrt
       run: |
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: 生成配置文件 (.config)
+    - name: 动态生成 .config 配置文件
       working-directory: ./openwrt
       run: |
         cat > .config <<EOF
+        # 基础架构与矩阵机型替换
         CONFIG_TARGET_mediatek=y
-        
-        # 兼容 mt798x sdk 树结构
-        CONFIG_TARGET_mediatek_mt7981=y
-        CONFIG_TARGET_mediatek_mt7981_DEVICE_jcg_q30=y
-        CONFIG_TARGET_mediatek_mt7981_DEVICE_jcg_q30-ubootmod=y
-        
-        # 兼容 filogic 主线树结构
         CONFIG_TARGET_mediatek_filogic=y
-        CONFIG_TARGET_mediatek_filogic_DEVICE_jcg_q30=y
-        CONFIG_TARGET_mediatek_filogic_DEVICE_jcg_q30-ubootmod=y
+        CONFIG_TARGET_mediatek_filogic_DEVICE_${{ matrix.DEVICE_PROFILE }}=y
+
+        # 分区大小优化 (160MB 且只用 squashfs)
+        CONFIG_TARGET_ROOTFS_SQUASHFS=y
+        # CONFIG_TARGET_ROOTFS_EXT4 is not set
+        CONFIG_TARGET_ROOTFS_PARTSIZE=160
+
+        # 主题替换：干掉 Bootstrap，换上 Argon
+        # CONFIG_PACKAGE_luci-theme-bootstrap is not set
+        CONFIG_PACKAGE_luci-theme-argon=y
+        CONFIG_PACKAGE_luci-app-argon-config=y
+
+        # 校园网认证利器
+        CONFIG_PACKAGE_luci-app-mentohust=y
+        CONFIG_PACKAGE_luci-app-minieap=y
         
-        # 基础 LuCI 界面与中文语言包
-        CONFIG_PACKAGE_luci=y
-        CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
-        
-        # 终端神器 ttyd
+        # 魔法核心 (只用 Sing-Box)
+        CONFIG_PACKAGE_luci-app-singbox=y
+        # CONFIG_PACKAGE_luci-app-passwall is not set
+
+        # 宿舍网络增强与加速
+        CONFIG_PACKAGE_luci-app-mwan3=y
+        CONFIG_PACKAGE_luci-app-watchcat=y
+        CONFIG_PACKAGE_luci-app-upnp=y
+        CONFIG_PACKAGE_luci-app-turboacc-mtk=y
+        CONFIG_PACKAGE_kmod-tcp-bbr=y
+
+        # 必备排错系统工具
         CONFIG_PACKAGE_luci-app-ttyd=y
-        CONFIG_PACKAGE_luci-i18n-ttyd-zh-cn=y
-        
-        # 基础网络工具
         CONFIG_PACKAGE_curl=y
-        CONFIG_PACKAGE_wget-ssl=y
+        CONFIG_PACKAGE_htop=y
         CONFIG_PACKAGE_iperf3=y
         CONFIG_PACKAGE_tcpdump=y
         CONFIG_PACKAGE_mtr=y
-        CONFIG_PACKAGE_bind-dig=y
-        CONFIG_PACKAGE_ip-full=y
         EOF
         
-        # 自动补全依赖并清理无用的占位符
+        # 自动修复并补全配置
         make defconfig
 
-    - name: 下载所需依赖包
+    - name: 下载依赖包
       working-directory: ./openwrt
       run: |
         make download -j8 || make download -j1 V=s
 
-    - name: 开始编译固件 (大约需要 1.5 - 2 小时)
+    - name: 开始编译固件
       working-directory: ./openwrt
       run: |
         make -j$(nproc) || make -j1 V=s
 
-    - name: 整理编译好的固件文件
+    - name: 收集编译产物
       id: organize
+      working-directory: ./openwrt
       run: |
-        cd openwrt/bin/targets/*/*
-        rm -rf packages
+        mkdir -p ../firmware
+        # 只提取需要的 sysupgrade 和 recovery 刷机包，排除多余文件
+        cp bin/targets/mediatek/filogic/*sysupgrade.itb ../firmware/ 2>/dev/null || true
+        cp bin/targets/mediatek/filogic/*initramfs-recovery.itb ../firmware/ 2>/dev/null || true
+        cd ../firmware
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "DATE=$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-    - name: 上传固件到 GitHub 供下载
-      uses: actions/upload-artifact@v4
+    - name: 上传到 GitHub Releases
+      uses: softprops/action-gh-release@v2
       with:
-        name: ImmortalWrt-JCG_Q30-CustomUBoot-25.12
-        path: ${{ env.FIRMWARE }}/*
+        tag_name: ImmortalWrt-JCG_Q30-${{ env.DATE }}
+        name: ImmortalWrt 25.12 宿舍特供版 (${{ env.DATE }})
+        body: |
+          ## 编译机型
+          * JCG Q30 Pro (专属原版)
+          * JCG Q30 (多机型兼容版)
+          
+          ## 包含特性
+          * **主题**: Argon 动态主题
+          * **魔法**: Sing-Box (去除了臃肿的 Passwall)
+          * **加速**: TurboACC + BBR + FullCone NAT
+          * **校园网**: MentoHUST / MiniEAP
+          * **其他**: MWAN3(多拨), TTYD, Watchcat(防断网), UPnP
+        files: ${{ env.FIRMWARE }}/*
