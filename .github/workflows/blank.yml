@@ -1,7 +1,7 @@
 name: Build JCG Q30 Dormitory Edition (25.12)
 
 on:
-  workflow_dispatch: # 允许手动点击按钮触发编译
+  workflow_dispatch:
 
 jobs:
   build:
@@ -12,7 +12,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 矩阵编译：同时启动两台服务器，分别编译兼容版和Pro专属版
         DEVICE_PROFILE: [jcg_q30, jcg_q30-pro]
 
     steps:
@@ -30,13 +29,15 @@ jobs:
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
 
-    - name: 拉取源码 (chasey-dev 25.12分支)
+    - name: 拉取源码
       run: |
         git clone -b 25.12 --depth 1 https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git openwrt
 
-    - name: 更新及安装 Feeds 插件包
+    - name: 添加插件源
       working-directory: ./openwrt
       run: |
+        echo "src-git kenzo https://github.com/kenzok8/openwrt-packages" >> feeds.conf.default
+        echo "src-git small https://github.com/kenzok8/small" >> feeds.conf.default
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
@@ -44,18 +45,13 @@ jobs:
       working-directory: ./openwrt
       run: |
         cat > .config <<EOF
-        # 基础架构与矩阵机型变量
         CONFIG_TARGET_mediatek=y
         CONFIG_TARGET_mediatek_filogic=y
         CONFIG_TARGET_mediatek_filogic_DEVICE_${{ matrix.DEVICE_PROFILE }}=y
 
-        # 分区大小优化 (160MB 且强制使用 squashfs)
         CONFIG_TARGET_ROOTFS_SQUASHFS=y
-        # CONFIG_TARGET_ROOTFS_EXT4 is not set
         CONFIG_TARGET_ROOTFS_PARTSIZE=160
 
-        # 主题替换：禁用旧版丑陋 Bootstrap，启用酷炫 Argon
-        # CONFIG_PACKAGE_luci-theme-bootstrap is not set
         CONFIG_PACKAGE_luci-theme-argon=y
         CONFIG_PACKAGE_luci-app-argon-config=y
 
@@ -64,7 +60,7 @@ jobs:
         CONFIG_PACKAGE_luci-app-turboacc-mtk=y
         CONFIG_PACKAGE_kmod-tcp-bbr=y
 
-        # 2. 宿舍防吵架神器 (IP限速与上网控制)
+        # 2. 宿舍防抢网神器
         CONFIG_PACKAGE_luci-app-eqos=y
         CONFIG_PACKAGE_luci-app-access-control=y
 
@@ -73,16 +69,25 @@ jobs:
         CONFIG_PACKAGE_luci-app-minieap=y
         CONFIG_PACKAGE_luci-app-mwan3=y
 
-        # 4. 远程维护 (后门与自愈)
+        # 4. 远程维护
         CONFIG_PACKAGE_luci-app-tailscale=y
         CONFIG_PACKAGE_luci-app-ttyd=y
         CONFIG_PACKAGE_luci-app-watchcat=y
 
-        # 5. 魔法与代理 (仅使用轻量全能的 Sing-Box)
+        # 5. 魔法与代理
         CONFIG_PACKAGE_luci-app-singbox=y
-        # CONFIG_PACKAGE_luci-app-passwall is not set
 
-        # 补充：基础网络排错工具
+        # 6. UA2F 与 RKP-IPID 兼容性依赖配置 (关键！)
+        CONFIG_PACKAGE_iptables-nft=y
+        CONFIG_PACKAGE_iptables-mod-nfqueue=y
+        CONFIG_PACKAGE_kmod-nft-queue=y
+        CONFIG_PACKAGE_kmod-ipt-nat=y
+        CONFIG_PACKAGE_luci-app-ua2f=y
+        CONFIG_PACKAGE_ua2f=y
+        CONFIG_PACKAGE_luci-app-rkp-ipid=y
+        CONFIG_PACKAGE_rkp-ipid=y
+
+        # 基础工具
         CONFIG_PACKAGE_curl=y
         CONFIG_PACKAGE_htop=y
         CONFIG_PACKAGE_iperf3=y
@@ -90,7 +95,6 @@ jobs:
         CONFIG_PACKAGE_mtr=y
         EOF
         
-        # 自动补全并校验依赖
         make defconfig
 
     - name: 多线程下载依赖包
@@ -103,47 +107,25 @@ jobs:
       run: |
         make -j$(nproc) || make -j1 V=s
 
-    - name: 将所有底层固件与刷机包打包为 ZIP
+    - name: 打包固件
       id: organize
       run: |
-        # 进入最终生成的固件目录
         cd openwrt/bin/targets/mediatek/filogic/
-        
-        # 删除不需要上传的零散 ipk 插件包文件夹（非常巨大且无用）
         rm -rf packages/
-        
-        # 获取日期
         DATE=$(date +"%Y%m%d")
-        # 定义 ZIP 压缩包的名称（带有对应机型名字）
-        ARCHIVE_NAME="ImmortalWrt-${{ matrix.DEVICE_PROFILE }}-Full-$DATE.zip"
-        
-        # 将当前目录下所有文件（sysupgrade, recovery, fip, preloader 等）打包
+        ARCHIVE_NAME="ImmortalWrt-${{ matrix.DEVICE_PROFILE }}-$DATE.zip"
         zip -r $ARCHIVE_NAME ./*
-        
-        # 移动到独立文件夹准备上传
         mkdir -p ../../../../../firmware
         mv $ARCHIVE_NAME ../../../../../firmware/
         cd ../../../../../
         echo "FIRMWARE=$PWD/firmware" >> $GITHUB_ENV
         echo "DATE=$DATE" >> $GITHUB_ENV
 
-    - name: 上传完整压缩包到 GitHub Releases
+    - name: 上传到 GitHub Releases
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: JCG_Q30_Dormitory_Build_${{ github.run_id }}
+        tag_name: JCG_Q30_Build_${{ github.run_id }}
         name: ImmortalWrt 25.12 宿舍特供版 (${{ env.DATE }})
         body: |
-          ## 编译机型 (全量底层打包)
-          本次构建输出了完整的压缩包，解压后包含 `sysupgrade`, `initramfs-recovery`, `bl31-uboot.fip`, `preloader` 等全套底层文件。
-          
-          * **`jcg_q30-pro`**：JCG Q30 Pro 专属版
-          * **`jcg_q30`**：JCG Q30 标准/兼容版
-          
-          ## 核心亮点
-          * **UI 主题**: Argon (毛玻璃效果)
-          * **网络加速**: TurboACC (HWNAT) + BBR + UPnP
-          * **防抢网速**: EQoS 单 IP 限速 + 访问控制
-          * **魔法出海**: Sing-Box (极致轻量)
-          * **校园认证**: MentoHUST / MiniEAP / MWAN3
-          * **远程救砖**: Tailscale 内网穿透 + Watchcat 断网重启 + TTYD
+          已适配 NFTables 兼容层，内置 UA2F 及 RKP-IPID。
         files: ${{ env.FIRMWARE }}/*.zip
