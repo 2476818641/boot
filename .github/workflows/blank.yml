@@ -55,35 +55,23 @@ jobs:
         CONFIG_PACKAGE_luci-theme-argon=y
         CONFIG_PACKAGE_luci-app-argon-config=y
 
-        # 1. 宿舍联机与游戏必备
+        # 核心插件
         CONFIG_PACKAGE_luci-app-upnp=y
         CONFIG_PACKAGE_luci-app-turboacc-mtk=y
         CONFIG_PACKAGE_kmod-tcp-bbr=y
-
-        # 2. 宿舍防抢网神器
         CONFIG_PACKAGE_luci-app-eqos=y
         CONFIG_PACKAGE_luci-app-access-control=y
-
-        # 3. 校园网特殊环境
         CONFIG_PACKAGE_luci-app-mentohust=y
         CONFIG_PACKAGE_luci-app-minieap=y
         CONFIG_PACKAGE_luci-app-mwan3=y
-
-        # 4. 远程维护
         CONFIG_PACKAGE_luci-app-tailscale=y
         CONFIG_PACKAGE_luci-app-ttyd=y
         CONFIG_PACKAGE_luci-app-watchcat=y
-
-        # 5. 魔法与代理
         CONFIG_PACKAGE_luci-app-singbox=y
 
-        # 6. UA2F 与 RKP-IPID 兼容性依赖配置 (关键！)
-        CONFIG_PACKAGE_iptables-nft=y
-        CONFIG_PACKAGE_iptables-mod-nfqueue=y
-        CONFIG_PACKAGE_kmod-nft-queue=y
-        CONFIG_PACKAGE_kmod-ipt-nat=y
-        CONFIG_PACKAGE_luci-app-ua2f=y
-        CONFIG_PACKAGE_ua2f=y
+        # UA3F 与 RKP-IPID 配置 (UA3F 原生支持 nftables)
+        CONFIG_PACKAGE_luci-app-ua3f=y
+        CONFIG_PACKAGE_ua3f=y
         CONFIG_PACKAGE_luci-app-rkp-ipid=y
         CONFIG_PACKAGE_rkp-ipid=y
 
@@ -127,5 +115,5 @@ jobs:
         tag_name: JCG_Q30_Build_${{ github.run_id }}
         name: ImmortalWrt 25.12 宿舍特供版 (${{ env.DATE }})
         body: |
-          已适配 NFTables 兼容层，内置 UA2F 及 RKP-IPID。
+          已升级使用 UA3F，支持更强大的防检测能力。
         files: ${{ env.FIRMWARE }}/*.zip
