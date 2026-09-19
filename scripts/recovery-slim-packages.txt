@@ -1,0 +1,63 @@
+# 精简 recovery 镜像 —— 保留包清单
+#
+# 用途：scripts/build-recovery-slim.sh 会读这份清单，只保留下列包（其余 CONFIG_PACKAGE_* 全部关闭），
+#       再生成一次镜像，得到 ~10MB 的 initramfs，使 256MB 内存的机器能正常启动（不再 OOM）。
+#
+# 规则：
+#   - 每行一个包名（OpenWrt 的 CONFIG_PACKAGE_ 之后的名字）
+#   - 依赖包不用写：make defconfig 会自动补齐
+#   - 不要放编译产物；不要放 ua2f / wifi 驱动 / 代理插件（它们是大户，recovery 不需要）
+#
+# 参考体积：正式 recovery 29MB（解包 ~95MB，必 OOM）→ 精简版目标 8~12MB（解包 ~25~35MB）
+# ---- 系统基础 ----
+base-files
+busybox
+procd
+procd-seccomp
+ubus
+uci
+logd
+urandom-seed
+urngd
+fstools
+block-mount
+ca-bundle
+apk-openssl
+# ---- 网络（LAN + DHCP + 防火墙，让网页可访问）----
+netifd
+dnsmasq
+odhcp6c
+odhcpd-ipv6only
+firewall4
+nftables-json
+# ---- 刷机工具（关键：少了任何一个都可能刷不动）----
+mtd
+ubi-utils
+nand-utils
+fitblk
+kmod-mtd-rw
+uboot-envtools
+# ---- 远程 / 网页界面（浏览器刷固件用）----
+dropbear
+uhttpd
+rpcd
+luci-base
+luci-mod-system
+luci-mod-network
+luci-mod-status
+luci-theme-bootstrap
+luci-i18n-base-zh-cn
+# ---- 引导产物（必需！生成 preloader.bin / bl31-uboot.fip 靠它们。少了这些包，
+#      make image 会在最开始阶段就失败：找不到 staging_dir 里的 bl2 / fip 文件）----
+trusted-firmware-a-mt7981-spim-nand-ddr3
+trusted-firmware-a-mt7981-ram-ddr3
+trusted-firmware-a-mt7981-ram-ddr4
+u-boot-mt7981_jcg_q30-pro
+
+# ---- 目标平台必需（按键、LED、平台服务）----
+kmod-leds-gpio
+kmod-gpio-button-hotplug
+kmod-nf-nathelper
+mtk-smp
+l1util
+default-settings-chn
