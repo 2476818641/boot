@@ -126,7 +126,39 @@ run boot_production
 
 ---
 
-## 编译（可选：自己出固件）
+## ☁️ 云端编译（GitHub Actions）—— 不需要本地环境
+
+**修改配置 → 云端出固件**，适合没有 Linux 编译环境的用户。
+
+### 用法
+
+1. **Fork** 本仓库（或在本仓库直接改）
+2. 在网页上编辑 **`.config`**（例如换机型、加减包、改 `CONFIG_UA2F_USER_AGENT_STRING`）
+3. 提交后 **自动开始编译**（改动 `.config` / `feeds.conf` 会触发）；也可以去
+   **Actions → Build ImmortalWrt (JCG Q30 Pro / Q30) → Run workflow** 手动触发
+4. 约 **2~4 小时**后，在该次运行的 **Artifacts** 里下载，或在 **Releases** 里下载（默认会发 Release）
+
+### 触发方式
+
+| 方式 | 说明 |
+|---|---|
+| 改 `.config` / `feeds.conf` 并提交到 `main` | 自动编译 |
+| Actions 页面 → Run workflow | 手动编译（可填 tag、可选是否发 Release）|
+| 推送 `v*` tag | 编译并发布 |
+
+### CI 环境的特殊处理（无需你操作，工作流自动做）
+
+- **临时移除镜像补丁**：`scripts/download.pl` 里的 ghproxy 改写、`feeds.conf` 的镜像地址会在 CI 里被替换为**直连 GitHub** ——
+  GitHub runner 在海外，直连比镜像快几十倍（实测镜像仅 61 KB/s）
+- **释放磁盘空间**：删掉 runner 上无用的 Android/dotnet 工具链，腾出 ~25GB 供编译
+- **缓存 `dl/`**：源码包缓存复用，第二次构建显著加快
+- **编译失败时**自动上传 `build.log` 与 `logs/` 供排查
+
+> 提示：本仓库只存源码，CI 需要完整跑一次工具链 + 380 个包，首次较慢属正常。
+
+---
+
+## 编译（本地：自己出固件）
 
 ```bash
 # 依赖与 feeds 见 .config / feeds.conf（feeds 走镜像加速）

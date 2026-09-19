@@ -1,0 +1,148 @@
+name: Build ImmortalWrt (JCG Q30 Pro / Q30)
+
+# 云端编译：不需要本地环境，改完 .config 直接跑出固件
+#   - 手动触发：Actions → 本工作流 → Run workflow（可填 tag / 是否发 Release）
+#   - 自动触发：修改 .config / feeds.conf / 本工作流，或推送 v* tag
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag（留空则用 build-日期-时间）'
+        required: false
+        type: string
+      make_release:
+        description: '构建完成后创建 Release'
+        required: false
+        type: boolean
+        default: true
+  push:
+    branches: [main]
+    paths:
+      - '.config'
+      - 'feeds.conf'
+      - '.github/workflows/build.yml'
+    tags: ['v*']
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 释放磁盘空间（OpenWrt 编译需要 ~25GB）
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+                      "$AGENT_TOOLSDIRECTORY" /usr/local/lib/node_modules
+          sudo apt-get clean
+          df -h /
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses-dev libssl-dev python3 python3-setuptools \
+            python3-venv rsync unzip zlib1g-dev file wget subversion swig time \
+            libelf-dev ccache
+          # 以下包在 Ubuntu 24.04 上可能已移除，失败不阻塞
+          sudo apt-get install -y python3-distutils ecj fastjar java-propose-classpath || true
+
+      - name: 切换到直连 GitHub（CI 在海外，无需镜像加速）
+        run: |
+          sed -i '/ghproxy/d' scripts/download.pl
+          cp -f feeds.conf.default feeds.conf
+          echo "--- download.pl 首行 ---"; head -3 scripts/download.pl
+          echo "--- feeds.conf ---"; cat feeds.conf
+
+      - name: 缓存源码包 dl/（后续构建大幅加速）
+        uses: actions/cache@v4
+        with:
+          path: dl
+          key: dl-${{ hashFiles('feeds.conf', '.config') }}
+          restore-keys: |
+            dl-
+
+      - name: 更新并安装 feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 应用 .config
+        run: |
+          make defconfig
+          echo "=== 目标机型 ==="
+          grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|PROFILE)=' .config
+
+      - name: 预下载源码
+        run: make -j$(nproc) download
+
+      - name: 编译
+        run: make -j$(nproc) 2>&1 | tee build.log
+
+      - name: 收集产物
+        if: success()
+        run: |
+          mkdir -p out
+          cd bin/targets/mediatek/filogic
+          cp -v *-squashfs-sysupgrade.itb \
+                *-initramfs-recovery.itb \
+                *-bl31-uboot.fip \
+                *-preloader.bin \
+                mt7981-ram-ddr3-bl2.bin \
+                sha256sums profiles.json ../../../../out/ 2>/dev/null || true
+          cp -v *.manifest ../../../../out/ 2>/dev/null || true
+          cd ../../../../out && ls -lh
+
+      - name: 上传产物（Artifacts）
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-jcg_q30-pro-${{ github.run_number }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 发布 Release
+        if: success() && (github.event_name == 'push' || inputs.make_release)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ inputs.tag }}"
+          [ -z "$TAG" ] && TAG="build-$(date +%Y%m%d-%H%M)"
+          gh release create "$TAG" out/* \
+            --title "ImmortalWrt JCG Q30 Pro/Q30 $TAG" \
+            --notes "云端编译产物（ImmortalWrt 25.12 rebase，目标 mediatek/filogic jcg_q30-pro）。
+
+          **刷机请务必先读硬刷方案文档：[docs/jcg-q30-pro/HUMAN-GUIDE.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/docs/jcg-q30-pro/HUMAN-GUIDE.md)**
+
+          | 文件 | 用途 |
+          |---|---|
+          | \`*-squashfs-sysupgrade.itb\` | 正式固件 → 写 \`fit\` 卷 / LuCI 升级 |
+          | \`*-bl31-uboot.fip\` | U-Boot 本体 → 写 \`fip\` 分区 |
+          | \`*-preloader.bin\` | BL2 → 写 \`bl2\` 分区（通常不用写）|
+          | \`*-initramfs-recovery.itb\` | 内存系统（本机 256MB 内存会 OOM，不建议用）|
+          | \`mt7981-ram-ddr3-bl2.bin\` | **给 mtk_uartboot 用的 RAM BL2**（不是 preloader！）|
+
+          校验值见 \`sha256sums\`。"
+
+      - name: 编译失败时上传日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: |
+            build.log
+            logs/
+          if-no-files-found: ignore
+          retention-days: 7
