@@ -136,13 +136,14 @@ run boot_production
 2. 在网页上编辑 **`.config`**（例如换机型、加减包、改 `CONFIG_UA2F_USER_AGENT_STRING`）
 3. 提交后 **自动开始编译**（改动 `.config` / `feeds.conf` 会触发）；也可以去
    **Actions → Build ImmortalWrt (JCG Q30 Pro / Q30) → Run workflow** 手动触发
-4. 约 **2~4 小时**后，在该次运行的 **Artifacts** 里下载，或在 **Releases** 里下载（默认会发 Release）
+4. 约 **3~5 小时**后（含精简 recovery 的第二遍编译），在该次运行的 **Artifacts** 里下载，
+   或在 **Releases** 里下载（默认会发 Release）
 
 ### 触发方式
 
 | 方式 | 说明 |
 |---|---|
-| 改 `.config` / `feeds.conf` 并提交到 `main` | 自动编译 |
+| 改 `.config` / `feeds.conf` / 精简脚本并提交到 `main` | 自动编译 |
 | Actions 页面 → Run workflow | 手动编译（可填 tag、可选是否发 Release）|
 | 推送 `v*` tag | 编译并发布 |
 
@@ -152,26 +153,45 @@ run boot_production
   GitHub runner 在海外，直连比镜像快几十倍（实测镜像仅 61 KB/s）
 - **释放磁盘空间**：删掉 runner 上无用的 Android/dotnet 工具链，腾出 ~25GB 供编译
 - **缓存 `dl/`**：源码包缓存复用，第二次构建显著加快
+- **自动产出精简 recovery**：正式构建后追加一遍 `scripts/build-recovery-slim.sh --slim-only`（复用工具链，
+  +20~40 分钟），把 29MB 原版 recovery 换成 **9.0MB 精简版**并重建 `sha256sums`，
+  工作流还会校验体积（>12MB 直接判失败）
+- **防静默丢包**：`scripts/check-package-selection.sh` 在 `make defconfig` 之后和产物出来后各查一次
+  (`scripts/required-packages.txt`)，缺 `ua2f` 等关键包**直接让构建失败**，而不是发一个没有防检测功能的固件
 - **编译失败时**自动上传 `build.log` 与 `logs/` 供排查
 
+> ⚠️ **重要：云端构建曾经静默丢掉 UA2F。**
+> 2026-09-19 的第一次云端构建（release `build-20260919-0910`）虽然显示成功，但产物里**没有 `ua2f`**：
+> `.config` 明确选了 380 个包，`make defconfig` 之后只剩 ~299 个，`ua2f` / `passwall` / `mwan3` /
+> `smartdns` / `argon` 全被丢掉，而工作流一路绿灯。
+> 现在工作流已加入两道硬校验（defconfig 之后 + 产物 manifest 之后），缺关键包直接失败并打印被丢掉的包清单；
+> 你自己下固件后也可以核对：`bash scripts/check-package-selection.sh --manifest <manifest 文件>`，
+> 或直接 `grep '^ua2f ' *.manifest`。
+>
 > 提示：本仓库只存源码，CI 需要完整跑一次工具链 + 380 个包，首次较慢属正常。
 
 ---
 
 ## 编译（本地：自己出固件）
 
+**默认就是一条命令 —— 它一次产出正式固件 + 精简 recovery**（详细说明见
+[docs/jcg-q30-pro/RECOVERY-SLIM-PLAN.md](docs/jcg-q30-pro/RECOVERY-SLIM-PLAN.md)）：
+
 ```bash
-# 依赖与 feeds 见 .config / feeds.conf（feeds 走镜像加速）
-export FORCE_UNSAFE_CONFIGURE=1        # root 身份编译必需，否则 tools/tar 会失败
-make -j$(nproc) V=s
+export FORCE_UNSAFE_CONFIGURE=1          # root 身份编译必需，否则 tools/tar 会失败
+bash scripts/build-recovery-slim.sh      # 正式构建 → 精简 recovery → 汇总到 recovery-slim-out/
+# 只想重做精简 recovery（正式产物已在）：bash scripts/build-recovery-slim.sh --slim-only
 ```
 
-产物在 `bin/targets/mediatek/filogic/`：
+首次编译约 1~2 小时。⚠️ 不要只用裸 `make -j$(nproc)` 就收工：那样产出的 recovery 是 29MB 原版，
+在 256MB 内存上**必然 OOM**（本脚本会用 9.0MB 精简版覆盖它）。
+
+产物在 `bin/targets/mediatek/filogic/`，脚本另外汇总一份可直接丢进 TFTP 目录的到 `recovery-slim-out/`：
 
 | 文件 | 大小 | 用途 |
 |---|---|---|
 | `...-squashfs-sysupgrade.itb` | 33866011 | 正式固件 → 写 `fit` 卷（或 LuCI 升级）|
-| `...-initramfs-recovery.itb` | 29360128 | 内存系统。⚠️ 默认 29MB 版在 256MB 内存上会 OOM，请改用 `scripts/build-recovery-slim.sh` 生成的 **9.0MB 精简版**（解包仅 20.5MB）|
+| `...-initramfs-recovery.itb` | 9437184 | 内存系统，**已是精简版**（原版 29MB 解包 ~95MB → OOM；精简版解包仅 20.5MB）|
 | `...-bl31-uboot.fip` | 1073444 | U-Boot 本体 → 写 `fip` 分区 |
 | `...-preloader.bin` | 230232 | BL2 → 写 `bl2` 分区（通常不用）|
 | `mt7981-ram-ddr3-bl2.bin` | 210368 | **给 mtk_uartboot 的 RAM BL2**（不是 preloader！）|
@@ -180,11 +200,15 @@ sha256：
 
 ```
 89c93f384470bfa7abecb16d62637dd8d5c3dd44deff11631db4660fd7c23f4f  ...-squashfs-sysupgrade.itb
-569936a52dfc54eb7194fbe0d145808fe3ecc40cbfffc167dc48b48c7a88f8ee  ...-initramfs-recovery.itb
+33bcb1f709fcc27599bb69b49a802288a61750973117f7e28ef0b87572ed3553  ...-initramfs-recovery.itb   （精简版）
 f06f684fe85b6ec1279c55b042f9143d40bbd848f3005b8af7562f6ddb4f9de3  ...-bl31-uboot.fip
 bf9724f7eb8c0ddddf1f8fc9d6c104d892c09621125ada137ca6b7447543cc7d  ...-preloader.bin
-bdb2493e36a169c652875529ee7d1e8ee7f1f064d5fa526fde36a1980676df35  mt7981-ram-ddr3-bl2.bin
+9e5431cce4ec06afde6bf216c8d31fdfa1b8ef3443aa6c86523ad22a1a12b059  mt7981-ram-ddr3-bl2.bin
 ```
+
+> ⚠️ 上面是**本次构建**的校验值。`fip` / `preloader` / RAM-BL2 里内嵌了编译时间戳
+> （`strings bl2 | grep Built` → `Built : 08:30:16, Sep 19 2026`），所以**你重新编译后哈希会变**，
+> 体积基本不变。判断文件对不对看体积 + 来源，校验以你自己那次构建的 `sha256sums` 为准。
 
 ---
 
@@ -205,17 +229,17 @@ bdb2493e36a169c652875529ee7d1e8ee7f1f064d5fa526fde36a1980676df35  mt7981-ram-ddr
 | **菜单写 NAND** | `5` 写正式固件 / `6` 写 recovery / `7` 写 FIP / `8` 写 BL2 | 不想敲命令 |
 | **mtk_uartboot** | 本 README「快速开始」第 1 步 | **终极保命**，BL2/FIP 全坏也能救 |
 
-⚠️ **「按住 reset」救砖要用精简 recovery 镜像**：
-原版 recovery 是 29MB、解包约 95MB，本机 256MB 内存**必然 OOM**，
-会陷入「启动 → 崩溃 → 再启动」循环并反复写 NAND。
+⚠️ **「按住 reset」救砖用的是编译产物里的精简 recovery，不是原版 29MB**：
 
-用下面这条生成 **9.0MB 精简版**（解包仅 20.5MB），替换 TFTP 目录里的同名文件后即可：
+OpenWrt 默认让 recovery 与正式固件共用同一套包（本仓库 380 个）→ 29MB、解包 ~95MB，
+本机 256MB 内存**必然 OOM**，会陷入「启动 → 崩溃 → 再启动」循环并反复写 NAND。
+本仓库的默认构建（`bash scripts/build-recovery-slim.sh`）已经把 recovery 换成
+**9.0MB 精简版**（只含 44 个包，解包仅 20.5MB），无需额外操作。
 
-```bash
-bash scripts/build-recovery-slim.sh      # 产物：recovery-slim-out/recovery-slim.itb
-```
+把产物里的 `...-initramfs-recovery.itb` 放进 TFTP 目录，即可：
+**按住 reset → U-Boot 自动 TFTP 拉取 → 进内存系统 → 浏览器刷固件（全程不需要串口）**。
+进系统后可用 `free -m` 自检（期望 ≥150MB 可用）。
 
-替换后：**按住 reset → U-Boot 自动 TFTP 拉取 → 进内存系统 → 浏览器刷固件（全程不需要串口）**。
 详见 [docs/jcg-q30-pro/RECOVERY-SLIM-PLAN.md](docs/jcg-q30-pro/RECOVERY-SLIM-PLAN.md)。
 
 ---

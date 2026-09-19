@@ -7,7 +7,7 @@
 |---|---|---|
 | [HUMAN-GUIDE.md](HUMAN-GUIDE.md) | 人 | 硬件/软件准备、10 步刷机流程、配置、三层救砖手段、问题解决大表、名词解释 |
 | [AI-CONTEXT.md](AI-CONTEXT.md) | AI | 设备与分区事实、产物哈希、U-Boot 环境变量语义、命令序列、诊断决策树、反模式、验收清单 |
-| [RECOVERY-SLIM-PLAN.md](RECOVERY-SLIM-PLAN.md) | 方案 | 精简 recovery 镜像（29MB → 9.0MB，解包 95MB → 20.5MB）：包清单、构建脚本、集成方式、失败记录与实测数据 |
+| [RECOVERY-SLIM-PLAN.md](RECOVERY-SLIM-PLAN.md) | 方案 | 精简 recovery 镜像（29MB → 9.0MB，解包 95MB → 20.5MB）：**已集成进默认构建**，含包清单、构建脚本、失败记录与实测数据 |
 
 ## 一句话结论
 
@@ -16,7 +16,8 @@
 - 通常**只换 `fip` 分区**即可（BL2 保留，少写一次少一层风险）
 - U-Boot 里 `mtd` 的数字参数是**十六进制**，一律用 `$filesize`
 - 刷完必须用 `run boot_production` 再启动一次，否则没有 overlay（只读系统）
-- 「按住 reset」救砖必须配 **精简 recovery**（9.0MB）：`bash scripts/build-recovery-slim.sh`
+- 「按住 reset」救砖靠**精简 recovery**（9.0MB）—— **默认构建产物就是它**，
+  一条命令搞定：`bash scripts/build-recovery-slim.sh`
 
 ## 硬件
 

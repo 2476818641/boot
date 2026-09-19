@@ -20,6 +20,10 @@ on:
     paths:
       - '.config'
       - 'feeds.conf'
+      - 'scripts/build-recovery-slim.sh'
+      - 'scripts/recovery-slim-packages.txt'
+      - 'scripts/check-package-selection.sh'
+      - 'scripts/required-packages.txt'
       - '.github/workflows/build.yml'
     tags: ['v*']
 
@@ -80,15 +84,42 @@ jobs:
 
       - name: 应用 .config
         run: |
-          make defconfig
+          cp -f .config .config.requested      # 留一份"我想要什么"，用于下面的丢包校验
+          make defconfig 2>&1 | tee defconfig.log
           echo "=== 目标机型 ==="
           grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|PROFILE)=' .config
+
+      # 2026-09-19 的第一次云端构建就栽在这里：.config 里选了 380 个包，
+      # defconfig 之后静默只剩 ~299 个（ua2f / passwall / mwan3 / smartdns / argon 全没了），
+      # 但工作流一路绿灯还发了 Release —— 云端固件没有防检测功能却没人知道。
+      # 这一步把"静默丢包"变成硬失败，并打印被丢掉的包清单。
+      - name: 校验包选择（防止 defconfig 静默丢包）
+        run: |
+          bash scripts/check-package-selection.sh --config .config.requested .config
 
       - name: 预下载源码
         run: make -j$(nproc) download
 
       - name: 编译
         run: make -j$(nproc) 2>&1 | tee build.log
+
+      # 默认构建的第二步：原版 recovery 是 29MB（解包 ~95MB），在 256MB 内存的
+      # JCG Q30 Pro 上必然 OOM。这里用 44 项保留清单再跑一遍镜像生成，
+      # 把 9.0MB 精简版装回同名文件，并重建 sha256sums。
+      - name: 精简 recovery 镜像（默认构建的一部分）
+        run: bash scripts/build-recovery-slim.sh --slim-only 2>&1 | tee -a build.log
+
+      - name: 校验产物（精简 recovery + 关键包）
+        run: |
+          cd bin/targets/mediatek/filogic
+          ls -l *-initramfs-recovery.itb
+          SIZE=$(stat -c%s *-initramfs-recovery.itb)
+          echo "recovery 体积: $SIZE 字节"
+          [ "$SIZE" -lt 12000000 ] || { echo "::error::recovery 不是精简版（期望 ~9.4MB）"; exit 1; }
+          sha256sum -c sha256sums
+          cd - >/dev/null
+          # 正式固件的 manifest（精简装配阶段已把正式 manifest 还原回来）
+          bash scripts/check-package-selection.sh --manifest bin/targets/mediatek/filogic/*.manifest
 
       - name: 收集产物
         if: success()
@@ -102,6 +133,8 @@ jobs:
                 mt7981-ram-ddr3-bl2.bin \
                 sha256sums profiles.json ../../../../out/ 2>/dev/null || true
           cp -v *.manifest ../../../../out/ 2>/dev/null || true
+          # 精简版的包清单（正式 manifest 已在装配阶段还原，这里留一份核对用）
+          cp -v ../../../../recovery-slim-out/recovery-slim.manifest ../../../../out/ 2>/dev/null || true
           cd ../../../../out && ls -lh
 
       - name: 上传产物（Artifacts）
@@ -131,7 +164,7 @@ jobs:
           | \`*-squashfs-sysupgrade.itb\` | 正式固件 → 写 \`fit\` 卷 / LuCI 升级 |
           | \`*-bl31-uboot.fip\` | U-Boot 本体 → 写 \`fip\` 分区 |
           | \`*-preloader.bin\` | BL2 → 写 \`bl2\` 分区（通常不用写）|
-          | \`*-initramfs-recovery.itb\` | 内存系统（本机 256MB 内存会 OOM，不建议用）|
+          | \`*-initramfs-recovery.itb\` | 内存系统，**已是 9.0MB 精简版** → 按住 reset + TFTP 救砖用 |
           | \`mt7981-ram-ddr3-bl2.bin\` | **给 mtk_uartboot 用的 RAM BL2**（不是 preloader！）|
 
           校验值见 \`sha256sums\`。"
@@ -143,6 +176,9 @@ jobs:
           name: build-log-${{ github.run_number }}
           path: |
             build.log
+            defconfig.log
+            recovery-slim-build.log
+            build-production.log
             logs/
           if-no-files-found: ignore
           retention-days: 7

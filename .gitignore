@@ -42,4 +42,5 @@ git-src
 /.config.production
 /.config.slim
 /recovery-slim-build.log
+/build-production.log
 /recovery-slim-out/

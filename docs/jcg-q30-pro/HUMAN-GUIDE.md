@@ -33,12 +33,13 @@
 - TFTP 服务器：**Tftpd64**（Windows，重点：它的 **Log viewer 会显示请求的文件名**）
 - `mtk-uartboot-qt.exe`（BROM 级救砖工具）
 
-**文件（4 个，TFTP 根目录用原名，不要改名）**
+**文件（5 个，TFTP 根目录用原名，不要改名）**
 
 | 文件 | 大小 | 用途 |
 |---|---|---|
 | `...-bl31-uboot.fip` | 1073444 | U-Boot 本体 → 写 `fip` 分区 |
 | `...-squashfs-sysupgrade.itb` | 33866011 | 正式固件 → 写 `fit` 卷 |
+| `...-initramfs-recovery.itb` | 9437184 | **精简版**内存系统 → 按住 reset 救砖用（`make` 的默认产物就是它） |
 | `...-preloader.bin` | 230232 | BL2 → 写 `bl2` 分区（**通常不用写**） |
 | `mt7981-ram-ddr3-bl2.bin` | 210368 | **给 mtk_uartboot 用的 RAM BL2**（不是 preloader！）|
 
@@ -132,22 +133,28 @@
 | **② 菜单写 NAND** | 菜单 `5`=TFTP 写正式固件 / `6`=写 recovery / `7`=写 FIP / `8`=写 BL2 | 不想敲命令 |
 | **③ mtk_uartboot** | 本文第 5 步那条命令 | **终极保命**：BL2、U-Boot 全坏也能救 |
 
-⚠️ **"按住 reset"救砖需要「精简 recovery 镜像」**：
+⚠️ **"按住 reset"救砖能不能成，取决于 recovery 镜像占多少内存**：
 
-原版 recovery 是 29MB（解包约 95MB），本机只有 256MB 内存 → **必然 OOM 崩溃**，还会连累启动循环。
-本仓库提供了精简方案，一条命令生成 **9.0MB 版本**（解包仅 20.5MB）：
+OpenWrt 默认让 recovery 和正式固件**共用同一套已选包**（本仓库 380 个）→ initramfs 29MB、
+解包约 95MB，而本机只有 256MB 内存 → **必然 OOM 崩溃**，还会连累出启动循环。
+本仓库已经把这件事包在**默认编译**里了：正常 `make` 结束时，产物里的 recovery **就是精简版**
+（9.0MB / 解包 20.5MB，只含 44 个包），你不需要额外操作：
 
 ```bash
-bash scripts/build-recovery-slim.sh
-# 产物：recovery-slim-out/recovery-slim.itb（sha256 33bcb1f7…）
+make -j"$(nproc)"                                 # 默认编译 → recovery 已是精简版
+bash scripts/build-recovery-slim.sh --slim-only   # 只想重做精简 recovery（正式产物已在时）
+bash scripts/build-recovery-slim.sh               # 完整重来：正式构建 + 精简 recovery
+# 产物汇总在 recovery-slim-out/，含 sha256sums
 ```
 
-把 TFTP 目录里那个 29MB 的 `...-initramfs-recovery.itb` 换成它，之后就能用最省事的方式救砖：
+把编译产物里的 `...-initramfs-recovery.itb` 放进 TFTP 目录，就能用最省事的方式救砖：
 
 ```
 按住 reset 上电 → U-Boot 自动 TFTP 拉取 → 进内存系统 → 浏览器 192.168.1.1 上传固件
 （全程不需要串口、不需要 mtk_uartboot）
 ```
+
+进内存系统后自测：`free -m` 可用内存应 **≥150MB**（原版 29MB 会直接 panic，根本进不去）。
 
 详见 [RECOVERY-SLIM-PLAN.md](RECOVERY-SLIM-PLAN.md)。
 
@@ -164,7 +171,7 @@ bash scripts/build-recovery-slim.sh
 | 串口一条日志都没有 | 接触不良 / 串口被别的程序占用 | 关掉占用程序重开；断电重上电看 BL2 是否打印 |
 | mtk_uartboot 一直握不上手 | 上电时机不对 / 接触不良 | 先跑命令再上电；拔电重试多次 |
 | `mtd write fip 0x46000000 0 10734` 只写了 64KB | 该 U-Boot 的 `mtd` 数字参数是**十六进制**，且命令被吃字符 | **一律写 `$filesize`**，回车前看一眼整行 |
-| 内存系统起来后 OOM panic（`shmem:97564kB` → `deadlocked on memory`） | 256MB 内存装不下 29MB initramfs（解包约 95MB） | 改用精简 recovery（`bash scripts/build-recovery-slim.sh` → 9.0MB / 解包 20.5MB）；或走写 NAND 的路径 |
+| 内存系统起来后 OOM panic（`shmem:97564kB` → `deadlocked on memory`） | 256MB 内存装不下 29MB initramfs（解包约 95MB） | 用**精简 recovery**（默认编译产物就是 9.0MB / 解包 20.5MB）；或走写 NAND 的路径 |
 | 系统只读、主机名 `(none)`、`passwd: Read-only file system` | `boot_tftp_production` **不创建 overlay** | 用 `run boot_production` 或正常重启一次 |
 | 启动循环、每轮都 `Creating dynamic volume recovery` | ramoops 里有崩溃记录 → `bootcmd` 的 `pstore check` 跳过正常系统直奔 recovery | `setenv bootcmd 'run boot_ubi'` + `saveenv` + `mw.b 0x42ff0000 0 0x10000` |
 | `saveenv` 报 `Volume ubootenv2 not found` / `Failed (1)` | UBI 里缺 `ubootenv2` 冗余卷 | `ubi create ubootenv2 0x100000 dynamic` 后再 `saveenv` |
@@ -173,6 +180,7 @@ bash scripts/build-recovery-slim.sh
 | TFTP 完全没请求 | 网卡 IP 不对 / 防火墙把新网段判成"公用" | 网卡设 `.254`；防火墙专用+公用都放行 |
 | 自加的 `luci-app-ua2f` 编译后没生效 | 同名时 **luci feed 的版本覆盖本地 `package/` 的版本** | `./scripts/feeds uninstall luci-app-ua2f`（本地版生效）或直接用官方 JS 版 |
 | 以 root 编译报 `tools/tar failed to build` | GNU tar 的 configure 拒绝 root 身份 | `export FORCE_UNSAFE_CONFIGURE=1` 再编译 |
+| **云端编译（Actions）出来的固件里没有 UA2F** | 2026-09-19 第一次云端构建：`.config` 选了 380 个包，`make defconfig` 之后静默只剩 ~299，`ua2f`/`passwall`/`mwan3`/`smartdns`/`argon` 全被丢掉，而工作流仍然绿灯发 Release | 仓库已加校验：`scripts/check-package-selection.sh`（defconfig 后 + 产物 manifest 各查一次，缺关键包直接失败）。**自己下到固件后先看 `*.manifest` 里有没有 `ua2f`**；没有就别刷，或改用本地编译 |
 
 ---
 
@@ -195,14 +203,15 @@ bash scripts/build-recovery-slim.sh
 - **包管理器是 apk**：`apk add xxx` / `apk del xxx` / `apk update`
 - 以后 LuCI 里直接升级固件是**正常可用**的（会自动写 `fit` 卷）
 - 备份：LuCI → 系统 → 备份/刷写固件 里导出配置；改了重要东西后导出一次
-- **把 TFTP 目录里的 recovery 镜像改名**（例如加 `.disabled` 后缀）：
-  它在这台必然 OOM，改名后即使启动失败也只会安静循环，不会崩溃+反复写 NAND
+- **TFTP 目录里的 recovery 镜像请用精简版**：默认编译产物即是（9.0MB）。
+  如果你手上还是旧的 29MB 版（或别人给的固件包），把它换成精简版；实在没有，
+  就先把 TFTP 目录里的 recovery 改成别的名字（例如加 `.disabled` 后缀），
+  这样即使启动失败也只是安静循环，不会 OOM 崩溃 + 反复写 NAND
 - 串口探针拆下来前**拍照记录位置**，下次救砖省一半时间
 
 ---
 
 ## 九、还能做的后续（按需）
 
-1. **精简 recovery 镜像**（8~10MB）—— 修掉 256MB 内存的 OOM，让 reset 键恢复真正可用
-2. **把 TTL 规则打进固件**（`ip ttl set 64`）—— 应对同时检测 UA + TTL 的校园网
-3. 继续调 `.config` 里那 380 个包，或加你自己的插件
+1. **把 TTL 规则打进固件**（`ip ttl set 64`）—— 应对同时检测 UA + TTL 的校园网
+2. 继续调 `.config` 里那 380 个包，或加你自己的插件

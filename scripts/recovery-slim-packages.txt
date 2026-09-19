@@ -1,14 +1,15 @@
 # 精简 recovery 镜像 —— 保留包清单
 #
 # 用途：scripts/build-recovery-slim.sh 会读这份清单，只保留下列包（其余 CONFIG_PACKAGE_* 全部关闭），
-#       再生成一次镜像，得到 ~10MB 的 initramfs，使 256MB 内存的机器能正常启动（不再 OOM）。
+#       再生成一次镜像，得到 ~9MB 的 initramfs，使 256MB 内存的机器能正常启动（不再 OOM）。
+#       本清单**已经是默认构建的一部分**：正常编译/CI 产出的 recovery 就是用它生成的精简版。
 #
 # 规则：
 #   - 每行一个包名（OpenWrt 的 CONFIG_PACKAGE_ 之后的名字）
 #   - 依赖包不用写：make defconfig 会自动补齐
 #   - 不要放编译产物；不要放 ua2f / wifi 驱动 / 代理插件（它们是大户，recovery 不需要）
 #
-# 参考体积：正式 recovery 29MB（解包 ~95MB，必 OOM）→ 精简版目标 8~12MB（解包 ~25~35MB）
+# 实测体积：正式 recovery 29MB（解包 ~95MB，必 OOM）→ 本清单 9.0MB（解包 20.5MB，117 个包）
 # ---- 系统基础 ----
 base-files
 busybox

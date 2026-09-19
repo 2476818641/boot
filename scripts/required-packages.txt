@@ -1,0 +1,36 @@
+# 必须存在于固件里的包（CI 会在编译前后各校验一次）
+#
+# 背景：2026-09-19 的云端构建（Actions run #1）**静默丢掉了 ua2f 及其同类包**：
+#   .config 里明明选中了 380 个包，但 `make defconfig` 之后只剩 ~299，
+#   产物 release 里没有 ua2f / luci-app-ua2f / passwall / mwan3 / smartdns / argon，
+#   而工作流一路绿灯（编译成功、发 Release）。也就是说云端固件**没有防检测功能**。
+# 这个清单 + scripts/check-package-selection.sh 就是让这种"静默丢包"直接失败。
+#
+# 校验方式（两种都对）：
+#   - 配置层：defconfig 之后 .config 里 CONFIG_PACKAGE_<name>=y 还在不在
+#   - 产物层：最终 *.manifest 里有没有这个包（apk 名字）
+#
+# 每行一个包名；# 开头是注释。改 .config 时记得同步这里的关键项。
+
+# —— 校园网防检测（本项目的核心，绝对不能丢）——
+ua2f
+luci-app-ua2f
+
+# —— 无线与硬件加速（MTK 私有驱动 + HNAT）——
+kmod-mt_wifi
+luci-app-mtwifi-cfg
+luci-app-turboacc-mtk
+
+# —— 界面与常用组件（丢了说明整个 feeds 选择都歪了）——
+luci-base
+luci-theme-argon
+luci-app-passwall
+mwan3
+smartdns
+dnsmasq-full
+wpad-openssl
+
+# —— 刷机/救砖必需 ——
+mtd
+fitblk
+uboot-envtools

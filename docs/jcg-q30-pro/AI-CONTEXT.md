@@ -53,17 +53,28 @@ Legacy/foreign layouts seen on the two units (before migration):
 | file | bytes | sha256 |
 |---|---|---|
 | `immortalwrt-mediatek-filogic-jcg_q30-pro-squashfs-sysupgrade.itb` | 33866011 | `89c93f384470bfa7abecb16d62637dd8d5c3dd44deff11631db4660fd7c23f4f` |
-| `immortalwrt-mediatek-filogic-jcg_q30-pro-initramfs-recovery.itb` | 29360128 | `569936a52dfc54eb7194fbe0d145808fe3ecc40cbfffc167dc48b48c7a88f8ee` |
-| `recovery-slim.itb`（精简版 recovery，**推荐替换上者**） | 9437184 (9.0 MB) | `33bcb1f709fcc27599bb69b49a802288a61750973117f7e28ef0b87572ed3553` |
+| `immortalwrt-mediatek-filogic-jcg_q30-pro-initramfs-recovery.itb` | 9437184 (9.0 MB) | `33bcb1f709fcc27599bb69b49a802288a61750973117f7e28ef0b87572ed3553` |
+| `recovery-slim.itb` (same bytes as the row above; exported to `recovery-slim-out/`) | 9437184 | `33bcb1f7…` |
+| *stock* (unslimmed) recovery — what the file is called **before** the slim pass, **never boot it on this board** | 29360128 | `569936a52dfc54eb7194fbe0d145808fe3ecc40cbfffc167dc48b48c7a88f8ee` |
 | `immortalwrt-mediatek-filogic-jcg_q30-pro-bl31-uboot.fip` | 1073444 | `f06f684fe85b6ec1279c55b042f9143d40bbd848f3005b8af7562f6ddb4f9de3` |
 | `immortalwrt-mediatek-filogic-jcg_q30-pro-preloader.bin` | 230232 | `bf9724f7eb8c0ddddf1f8fc9d6c104d892c09621125ada137ca6b7447543cc7d` |
-| `mt7981-ram-ddr3-bl2.bin` (for mtk_uartboot) | 210368 | `bdb2493e36a169c652875529ee7d1e8ee7f1f064d5fa526fde36a1980676df35` |
+| `mt7981-ram-ddr3-bl2.bin` (for mtk_uartboot) | 210368 | `9e5431cce4ec06afde6bf216c8d31fdfa1b8ef3443aa6c86523ad22a1a12b059` |
+
+**Hash stability:** `fip` / `preloader` / RAM-BL2 embed a build timestamp
+(`strings mt7981-ram-ddr3-bl2.bin | grep Built` → `Built : 08:30:16, Sep 19 2026`), so their sha256 changes
+on every rebuild while the size stays the same. Treat the hashes above as "this build", and trust the
+per-build `sha256sums` / `recovery-slim-out/sha256sums` instead. (A RAM BL2 circulated earlier with
+`bdb2493e…` — same size, earlier build; it is never written to NAND, so either loads fine.)
 
 Version string: `ImmortalWrt 25.12-SNAPSHOT r38026-5e20cf34aa`, kernel `6.12.87`.
 U-Boot banner: `U-Boot 2025.10-ImmortalWrt-r38026-5e20cf34aa (May 25 2026 - 10:39:51 +0000)`.
 
 **Critical distinction:** `preloader.bin` (230232, NAND BL2) is **NOT** interchangeable with
 `mt7981-ram-ddr3-bl2.bin` (210368, RAM BL2). mtk_uartboot takes the *RAM* one.
+
+**The default build emits the slim recovery** (§10b): `scripts/build-recovery-slim.sh` (and therefore the
+GitHub Actions workflow) rebuilds the recovery with the 44-entry keep list and drops the 9.0 MB result under
+the canonical `...-initramfs-recovery.itb` name. Ship that, not the 29 MB one.
 
 ---
 
@@ -177,8 +188,10 @@ setenv bootcmd 'run boot_ubi'     # immune to stale pstore records
 saveenv                           # if it fails with "Volume ubootenv2 not found": ubi create ubootenv2 0x100000 dynamic
 mw.b 0x42ff0000 0 0x10000         # clear ramoops crash record
 ```
-Also rename `...-initramfs-recovery.itb` in the TFTP root (e.g. append `.disabled`) so the fallback loop can
-never boot the 29 MB initramfs (guaranteed OOM on 256 MiB RAM) and cannot rewrite NAND in a loop.
+Also make sure the TFTP root holds the **slim** `...-initramfs-recovery.itb` (9.0 MB — the default build
+product), so the reset-button / `boot_tftp_forever` fallback converges instead of OOM-looping. If all you have
+is a stock 29 MB recovery image, rename it in the TFTP root (e.g. append `.disabled`): the fallback loop then
+fails cleanly (no OOM panic, no repeated `ubi write`) instead of rewriting NAND forever.
 
 ---
 
@@ -200,10 +213,10 @@ never boot the 29 MB initramfs (guaranteed OOM on 256 MiB RAM) and cannot rewrit
 | BL2 + FIP both dead | **mtk_uartboot** (BROM) — Procedure A step 1 |
 | whole flash layout wrong | Procedure A from step 4 |
 
-Anti-pattern: **do not use the reset-button recovery path with the stock 29 MB recovery image** on this board
-(29 MB initramfs expands to ~95 MB → guaranteed OOM loop, see §7). Use the **slim recovery** instead
-(`bash scripts/build-recovery-slim.sh` → 9.0 MB artifact, 20.5 MB unpacked, sha256 `33bcb1f7…`),
-which makes reset+TFTP recovery viable again.
+Anti-pattern: **do not boot the stock 29 MB recovery image** on this board (29 MB initramfs expands to
+~95 MB → guaranteed OOM loop, see §7). Use the **slim recovery** instead — it is what the default build
+produces (`bash scripts/build-recovery-slim.sh`): 9.0 MB artifact, 20.5 MB unpacked, sha256 `33bcb1f7…`.
+That makes the reset+TFTP recovery path viable (statically verified; on-device run still pending).
 
 ---
 
@@ -228,7 +241,7 @@ which makes reset+TFTP recovery viable again.
 | observed | meaning | action |
 |---|---|---|
 | `Waiting for root device /dev/fit0...` then reboot loop | FIT lives in the wrong UBI volume (`kernel`) | create/populate `fit` (run `boot_tftp_production`) |
-| `shmem:97564kB` … `Kernel panic - not syncing: System is deadlocked on memory` | 29 MB initramfs + 256 MiB RAM, no overlay space | do not boot the recovery initramfs; flash to NAND instead |
+| `shmem:97564kB` … `Kernel panic - not syncing: System is deadlocked on memory` | **stock** 29 MB initramfs + 256 MiB RAM | use the slim recovery (9.0 MB, default build product); flashing to NAND also avoids initramfs entirely |
 | `hostname=(none)`, `passwd: Read-only file system`, no `/overlay` | booted right after `boot_tftp_production` (no `ubi_prepare_rootfs`) | `run boot_production` or reboot |
 | boot keeps TFTP-ing recovery + `Creating dynamic volume recovery` | stale pstore → `bootcmd` diverts; `replacevol` set | `setenv bootcmd 'run boot_ubi'`, `saveenv`, `mw.b 0x42ff0000 0 0x10000` |
 | `Saving Environment to UBI... Volume ubootenv2 not found! Failed (1)` | redundant env volume missing | `ubi create ubootenv2 0x100000 dynamic` then `saveenv` |
@@ -277,8 +290,7 @@ cache: dl/ (~1.7 GB) warm; full build ~1–3 h, ~19 GB disk
 ```
 
 Rebuild knobs discussed but NOT yet done:
-1. **slim recovery image** (~8–10 MB) to make the reset/TFTP recovery path usable on 256 MiB RAM.
-2. **TTL rule baked into the image** (`files/` + `iptables`/`nft ip ttl set 64`) against Dr.Com-style
+1. **TTL rule baked into the image** (`files/` + `iptables`/`nft ip ttl set 64`) against Dr.Com-style
    UA+TTL detection.
 
 ---
@@ -291,18 +303,21 @@ Rebuild knobs discussed but NOT yet done:
 - Do not delete `ubootenv`/`ubootenv2`.
 - Do not type numeric sizes into U-Boot `mtd` (hex!); use `$filesize`.
 - Do not power off while `mtd erase/write` or `ubi write` is running.
-- Do not boot the 29 MB recovery initramfs on this board (guaranteed OOM loop).
+- Do not boot the stock 29 MB recovery initramfs on this board (guaranteed OOM loop) — the default build
+  already replaces it with the 9.0 MB slim one.
 - Do not rely on keystroke interruption of autoboot (`bootstopkey` empty); use the 3 s menu or mtk_uartboot.
 - Do not insert the WAN port for TFTP/flashing; U-Boot works on any port, Linux only on lan1..3 — the
   mismatch produces a very convincing "everything is fine but no web UI" symptom.
 - Treat any "impossible" serial behaviour (no echo, keys lost, `0xa0 mismatch`) as **physical contact first**.
 
-## 10b. SLIM RECOVERY IMAGE (29 MB → 9.0 MB)
+## 10b. SLIM RECOVERY IMAGE (29 MB → 9.0 MB) — **part of the default build**
 
 Built and statically verified 2026-09-19; **runtime (on-device) validation still pending**.
 
 ```bash
-bash scripts/build-recovery-slim.sh      # → recovery-slim-out/recovery-slim.itb (+ .sha256, .manifest)
+bash scripts/build-recovery-slim.sh              # default: production build, then slim recovery pass, then assemble
+bash scripts/build-recovery-slim.sh --slim-only  # only redo the slim recovery (production artifacts already present; used by CI)
+make -j"$(nproc)"                                # for humans this is equivalent: the repo's default path ends in the same artifact set
 ```
 
 | metric | stock recovery | slim recovery |
@@ -317,12 +332,51 @@ bash scripts/build-recovery-slim.sh      # → recovery-slim-out/recovery-slim.i
 Mechanism: the `-recovery.itb` shares the production package set, so the script temporarily swaps `.config`
 with the 44-entry keep list (`scripts/recovery-slim-packages.txt`), runs `make` (world — note: **this tree has no
 `image` target**), then restores `.config` via a `trap` (fires on failure/Ctrl-C too). No source-tree patches.
+In default mode it backs up the production artifacts first, re-copies them over the slim build's output, then
+puts the slim `...-initramfs-recovery.itb` back under its canonical name and regenerates `sha256sums`;
+the final set lands in `recovery-slim-out/`.
 
 Keep-list must include the **boot artifact packages** or the image build fails immediately:
 `trusted-firmware-a-mt7981-spim-nand-ddr3` (→ `preloader.bin`), `u-boot-mt7981_jcg_q30-pro` (→ `bl31-uboot.fip`).
 
 Verify on device: boot it via TFTP (boot menu `2. Boot system via TFTP` = `tftpboot $bootfile && bootm`),
 then `free -m` (expect ≥150 MB free), `ubinfo -a`, `mtd -h`, `sysupgrade -h`, and a LuCI sysupgrade round-trip.
+Only after that may the docs change from "statically verified" to "on-device verified".
+
+## 10c. ⚠️ CLOUD BUILD ONCE SHIPPED A FIRMWARE WITHOUT UA2F (silent package drop)
+
+Evidence from Actions run #1 (2026-09-19, commit `2cbe18ff`, release `build-20260919-0910`):
+
+| fact | value |
+|---|---|
+| `.config` in the pushed tree | 380 `CONFIG_PACKAGE_*=y` (verified via raw.githubusercontent at that SHA; `ua2f=y`, `luci-app-passwall=y`) |
+| image manifest in the release | **299 packages**, and **no `ua2f` / `luci-app-ua2f` / `luci-app-passwall` / `mwan3` / `smartdns` / `luci-theme-argon`** |
+| compile log | only 18 `feeds/*` packages compiled (luci-base + mods + bootstrap theme + cgi-io); `ua2f` never built |
+| sysupgrade size | 19,005,716 B vs 33,866,011 B for the same `.config` built locally |
+| workflow status | **success**, Release published — nothing flagged the loss |
+
+Reproduction attempts (same `.config`, feeds at the same branch tips, `./scripts/feeds install -a`
+→ 2038 installs like CI, `make defconfig`):
+- local VPS, old feeds (2026-05-26 checkouts): **380 kept**, `ua2f=y` survives ✅
+- local VPS, freshly cloned feeds at `openwrt-25.12` tips (2026-09): **381 kept**, `ua2f=y` survives ✅
+- repeated `make defconfig`: idempotent, no drops ✅
+So the trigger was **environment-specific to the runner** and is still unexplained; the post-defconfig
+`.config` of that run was never uploaded, so it cannot be inspected retroactively.
+
+Mitigation now in the repo (committed):
+
+```text
+scripts/required-packages.txt            # ua2f, luci-app-ua2f, kmod-mt_wifi, luci-app-passwall, ...
+scripts/check-package-selection.sh       # --config <requested> <effective> | --manifest <file>
+.github/workflows/build.yml              # runs the check right after defconfig AND on the final manifest
+```
+The `--config` mode also prints every package `make defconfig` dropped, so the next run that misbehaves
+will show the dropped list (and its `defconfig.log` is uploaded on failure).
+
+Rule for anyone touching the build: **never trust "the workflow is green"** — verify the produced
+`*.manifest` actually contains `ua2f` (`bash scripts/check-package-selection.sh --manifest <file>`).
+
+---
 
 ## 11. VERIFICATION CHECKLIST (per unit)
 
@@ -340,4 +394,4 @@ Reboot test: power-cycle, do not touch keys, expect autoboot into the system in 
 ```
 
 Status at time of writing: **unit 1 and unit 2 both PASS** (overlay mounted ~62 MiB, Web UI reachable,
-password set). Remaining optional work: slim recovery image, TTL rule.
+password set). Remaining optional work: TTL rule; on-device validation of the slim recovery.
