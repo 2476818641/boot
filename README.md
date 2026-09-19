@@ -242,6 +242,14 @@ bf9724f7eb8c0ddddf1f8fc9d6c104d892c09621125ada137ca6b7447543cc7d  ...-preloader.
 - ✅ 包含：完整 ImmortalWrt 源码树（已导入 MTK mt798x feeds）、`.config`（构建配方）、`feeds.conf`、镜像补丁、`docs/`、精简 recovery 构建脚本
 - ❌ 不含：`bin/` `build_dir/` `staging_dir/` `dl/` `tmp/` `logs/` `feeds/` `*.itb` `*.ipk` `build.log`、任何密钥
 
+### 相关仓库（校园网登录那套脚本**不在本仓库**）
+
+固件之外的"上网辅助"工具单独放，避免和编译/刷机内容混在一起：
+
+| 仓库 | 内容 |
+|---|---|
+| [2476818641/Login-edu](https://github.com/2476818641/Login-edu) | 校园网登录/认证工具集。目前含 `openwrt/`：一键配置（MAC 克隆 / TTL / MTU / UA + PPPoE / 网页认证）、网页认证脚本、WAN 上线自动认证（hotplug + cron 兜底）、抓包清单 |
+
 ---
 
 ## 救砖三层保险
