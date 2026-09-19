@@ -31,6 +31,7 @@ DRY_RUN="${DRY_RUN:-0}"
 WAIT_SECS="${WAIT_SECS:-20}"
 TTL_VALUE="${TTL_VALUE:-64}"
 TTL_FILE="${TTL_FILE:-/etc/nftables.d/10-ttl-fix.nft}"
+SYSFS="${SYSFS:-/sys/class/net}"		# 可覆盖，便于测试
 LOG_TAG="campus-setup"
 PORTAL_SCRIPT="${PORTAL_SCRIPT:-}"
 CAMPUS_MODE="${CAMPUS_MODE:-}"
@@ -57,7 +58,19 @@ uget() { uci -q get "$1" 2>/dev/null; }
 command -v uci >/dev/null 2>&1 || die "找不到 uci —— 这个脚本要在 OpenWrt 路由器上运行"
 
 # ---------------------------------------------------------------- 探测现状
-# 上网接口：优先 WANIF 环境变量，否则看 wan 有没有设备，再看 wwan（无线 STA）
+# 上网接口怎么定（优先级从高到低）：
+#   1) WANIF 环境变量
+#   2) 默认路由的出口设备反查 UCI 接口 —— 这是最准的：无线上联时会自动认出 wwan（设备 apclix0 之类）
+#   3) 兜底：wan 有设备就用 wan，否则 wwan，再否则 wan
+DEFDEV_RAW="$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')"
+DEFDEV_BASE="${DEFDEV_RAW#pppoe-}"	# pppoe-wan -> wan
+if [ -z "${WANIF:-}" ] && [ -n "$DEFDEV_BASE" ]; then
+	for _i in $(uci show network 2>/dev/null | sed -n "s/^network\.\([^.]*\)\.proto='[^']*'$/\1/p"); do
+		_d="$(uget network.$_i.device)"; [ -z "$_d" ] && _d="$(uget network.$_i.ifname)"
+		_d="${_d%% *}"
+		if [ -n "$_d" ] && [ "$_d" = "$DEFDEV_BASE" ]; then WANIF="$_i"; break; fi
+	done
+fi
 if [ -z "${WANIF:-}" ]; then
 	if [ -n "$(uget network.wan.device)$(uget network.wan.ifname)" ]; then WANIF="wan"
 	elif [ -n "$(uget network.wwan.device)$(uget network.wwan.ifname)" ]; then WANIF="wwan"
@@ -66,7 +79,7 @@ fi
 WANDEV="$(uget network.$WANIF.device)"; [ -z "$WANDEV" ] && WANDEV="$(uget network.$WANIF.ifname)"
 WANDEV="${WANDEV%% *}"; [ -z "$WANDEV" ] && WANDEV="$WANIF"
 OLD_PROTO="$(uget network.$WANIF.proto)"
-DEFDEV="$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')"
+DEFDEV="$DEFDEV_RAW"
 
 # LAN 侧网桥：TTL 规则排除它们，其余出口一律改写 → 网线 / PPPoE / 无线 STA 通吃
 LAN_DEVS=""
@@ -79,24 +92,36 @@ LAN_DEVS="${LAN_DEVS%,}"
 LAN_DEVS="${LAN_DEVS# }"
 
 info "当前状态"
-msg "    上网接口     : network.$WANIF（设备 $WANDEV，proto ${OLD_PROTO:-未知}）"
-msg "    默认路由出口 : ${DEFDEV:-还没通}"
-msg "    当前 WAN MAC : $(cat "/sys/class/net/$WANDEV/address" 2>/dev/null || echo 未知)"
-msg "    当前 WAN MTU : $(cat "/sys/class/net/$WANDEV/mtu" 2>/dev/null || echo 未知)"
+msg "    上网接口     : network.$WANIF（设备 $WANDEV，proto ${OLD_PROTO:-未知}）$([ -n "$DEFDEV_BASE" ] && [ "$WANIF" != "wan" ] && echo '  ← 按默认路由反查出来的')"
+msg "    默认路由出口 : ${DEFDEV_RAW:-还没通}$([ -n "$DEFDEV_RAW" ] && echo "（对应接口 network.$WANIF）")"
+msg "    当前 WAN MAC : $(cat "$SYSFS/$WANDEV/address" 2>/dev/null || echo 未知)"
+msg "    当前 WAN MTU : $(cat "$SYSFS/$WANDEV/mtu" 2>/dev/null || echo 未知)"
 msg "    TTL 规则     : $([ -f "$TTL_FILE" ] && echo "有（$TTL_FILE，会被覆盖）" || echo 无)"
 if [ -x /usr/bin/ua2f ] || [ -n "$(uget ua2f.enabled.enabled)" ]; then
 	msg "    UA2F         : 已安装（启用=$([ "$(uget ua2f.enabled.enabled)" = 1 ] && echo 是 || echo 否)）"
 else
 	msg "    UA2F         : 未安装"
 fi
-case "$DEFDEV" in
-*sta*|wlan*|ra[0-9]*|apcl*)
-	warn "默认路由出口 $DEFDEV 是无线（STA）→ 必须是**路由模式**（wwan 独立接口 + NAT），"
-	msg "         不能桥接中继（relayd/WDS）：桥接走二层、不过 IP 栈，UA2F 和 TTL 都不会生效"
-	;;
-esac
-if [ "$WANIF" = "wan" ] && [ -r "/sys/class/net/$WANDEV/carrier" ] && \
-   [ "$(cat "/sys/class/net/$WANDEV/carrier" 2>/dev/null)" = "0" ]; then
+# LAN 网桥设备名（用来判断无线上联是"路由模式"还是"桥接中继"）
+LANBR=""
+for _i in lan; do
+	_d="$(uget network.$_i.device)"; [ -n "$_d" ] && LANBR="${_d%% *}"
+done
+[ -z "$LANBR" ] && LANBR="br-lan"
+# 出口设备是不是 LAN 网桥的成员端口？是 → 桥接中继（UA2F/TTL 都会失效）
+if [ -n "$DEFDEV_RAW" ] && [ -e "$SYSFS/$LANBR/brif/$DEFDEV_RAW" ]; then
+	warn "默认路由出口 $DEFDEV_RAW 是 LAN 网桥 $LANBR 的成员端口 → 这是**桥接中继**："
+	msg "         流量走二层、不过 IP 栈，UA2F 和 TTL 改写都不会生效。"
+	msg "         要改成路由模式：wwan 单独一个接口（不要桥进 $LANBR）+ LAN 用别的网段 + NAT"
+elif [ -n "$DEFDEV_RAW" ]; then
+	case "$DEFDEV_RAW" in
+	*sta*|wlan*|ra[0-9]*|apcl*)
+		msg "    无线上联   : $DEFDEV_RAW（路由模式 ✅ —— 独立的 network.$WANIF + 本身是另一个网段）"
+		;;
+	esac
+fi
+if [ "$WANIF" = "wan" ] && [ -r "$SYSFS/$WANDEV/carrier" ] && \
+   [ "$(cat "$SYSFS/$WANDEV/carrier" 2>/dev/null)" = "0" ]; then
 	warn "网口 $WANDEV 没有链路（carrier=0）：如果你是靠 WiFi 上校园网，"
 	msg "         请用 WANIF=wwan sh 本脚本，或者选方式 3（脚本才知道该配哪个接口）"
 fi
