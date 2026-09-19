@@ -37,3 +37,9 @@ git-src
 .vscode*
 
 /build.log
+
+# 精简 recovery 构建脚本的临时文件
+/.config.production
+/.config.slim
+/recovery-slim-build.log
+/recovery-slim-out/

@@ -132,8 +132,24 @@
 | **② 菜单写 NAND** | 菜单 `5`=TFTP 写正式固件 / `6`=写 recovery / `7`=写 FIP / `8`=写 BL2 | 不想敲命令 |
 | **③ mtk_uartboot** | 本文第 5 步那条命令 | **终极保命**：BL2、U-Boot 全坏也能救 |
 
-⚠️ **不要用"按住 reset"救砖**：那条路会在内存里启动 29MB 的 recovery 镜像，
-本机只有 256MB 内存，**必然 OOM 崩溃**，还会连累启动循环。
+⚠️ **"按住 reset"救砖需要「精简 recovery 镜像」**：
+
+原版 recovery 是 29MB（解包约 95MB），本机只有 256MB 内存 → **必然 OOM 崩溃**，还会连累启动循环。
+本仓库提供了精简方案，一条命令生成 **9.0MB 版本**（解包仅 20.5MB）：
+
+```bash
+bash scripts/build-recovery-slim.sh
+# 产物：recovery-slim-out/recovery-slim.itb（sha256 33bcb1f7…）
+```
+
+把 TFTP 目录里那个 29MB 的 `...-initramfs-recovery.itb` 换成它，之后就能用最省事的方式救砖：
+
+```
+按住 reset 上电 → U-Boot 自动 TFTP 拉取 → 进内存系统 → 浏览器 192.168.1.1 上传固件
+（全程不需要串口、不需要 mtk_uartboot）
+```
+
+详见 [RECOVERY-SLIM-PLAN.md](RECOVERY-SLIM-PLAN.md)。
 
 ---
 
@@ -148,7 +164,7 @@
 | 串口一条日志都没有 | 接触不良 / 串口被别的程序占用 | 关掉占用程序重开；断电重上电看 BL2 是否打印 |
 | mtk_uartboot 一直握不上手 | 上电时机不对 / 接触不良 | 先跑命令再上电；拔电重试多次 |
 | `mtd write fip 0x46000000 0 10734` 只写了 64KB | 该 U-Boot 的 `mtd` 数字参数是**十六进制**，且命令被吃字符 | **一律写 `$filesize`**，回车前看一眼整行 |
-| 内存系统起来后 OOM panic（`shmem:97564kB` → `deadlocked on memory`） | 256MB 内存装不下 29MB initramfs（解包约 95MB） | 别用内存 recovery；走写 NAND 的路径 |
+| 内存系统起来后 OOM panic（`shmem:97564kB` → `deadlocked on memory`） | 256MB 内存装不下 29MB initramfs（解包约 95MB） | 改用精简 recovery（`bash scripts/build-recovery-slim.sh` → 9.0MB / 解包 20.5MB）；或走写 NAND 的路径 |
 | 系统只读、主机名 `(none)`、`passwd: Read-only file system` | `boot_tftp_production` **不创建 overlay** | 用 `run boot_production` 或正常重启一次 |
 | 启动循环、每轮都 `Creating dynamic volume recovery` | ramoops 里有崩溃记录 → `bootcmd` 的 `pstore check` 跳过正常系统直奔 recovery | `setenv bootcmd 'run boot_ubi'` + `saveenv` + `mw.b 0x42ff0000 0 0x10000` |
 | `saveenv` 报 `Volume ubootenv2 not found` / `Failed (1)` | UBI 里缺 `ubootenv2` 冗余卷 | `ubi create ubootenv2 0x100000 dynamic` 后再 `saveenv` |

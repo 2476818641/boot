@@ -54,6 +54,7 @@ Legacy/foreign layouts seen on the two units (before migration):
 |---|---|---|
 | `immortalwrt-mediatek-filogic-jcg_q30-pro-squashfs-sysupgrade.itb` | 33866011 | `89c93f384470bfa7abecb16d62637dd8d5c3dd44deff11631db4660fd7c23f4f` |
 | `immortalwrt-mediatek-filogic-jcg_q30-pro-initramfs-recovery.itb` | 29360128 | `569936a52dfc54eb7194fbe0d145808fe3ecc40cbfffc167dc48b48c7a88f8ee` |
+| `recovery-slim.itb`（精简版 recovery，**推荐替换上者**） | 9437184 (9.0 MB) | `33bcb1f709fcc27599bb69b49a802288a61750973117f7e28ef0b87572ed3553` |
 | `immortalwrt-mediatek-filogic-jcg_q30-pro-bl31-uboot.fip` | 1073444 | `f06f684fe85b6ec1279c55b042f9143d40bbd848f3005b8af7562f6ddb4f9de3` |
 | `immortalwrt-mediatek-filogic-jcg_q30-pro-preloader.bin` | 230232 | `bf9724f7eb8c0ddddf1f8fc9d6c104d892c09621125ada137ca6b7447543cc7d` |
 | `mt7981-ram-ddr3-bl2.bin` (for mtk_uartboot) | 210368 | `bdb2493e36a169c652875529ee7d1e8ee7f1f064d5fa526fde36a1980676df35` |
@@ -199,7 +200,10 @@ never boot the 29 MB initramfs (guaranteed OOM on 256 MiB RAM) and cannot rewrit
 | BL2 + FIP both dead | **mtk_uartboot** (BROM) — Procedure A step 1 |
 | whole flash layout wrong | Procedure A from step 4 |
 
-Anti-pattern: **do not use the reset-button recovery path** on this board (29 MB initramfs → OOM loop, see §7).
+Anti-pattern: **do not use the reset-button recovery path with the stock 29 MB recovery image** on this board
+(29 MB initramfs expands to ~95 MB → guaranteed OOM loop, see §7). Use the **slim recovery** instead
+(`bash scripts/build-recovery-slim.sh` → 9.0 MB artifact, 20.5 MB unpacked, sha256 `33bcb1f7…`),
+which makes reset+TFTP recovery viable again.
 
 ---
 
@@ -292,6 +296,33 @@ Rebuild knobs discussed but NOT yet done:
 - Do not insert the WAN port for TFTP/flashing; U-Boot works on any port, Linux only on lan1..3 — the
   mismatch produces a very convincing "everything is fine but no web UI" symptom.
 - Treat any "impossible" serial behaviour (no echo, keys lost, `0xa0 mismatch`) as **physical contact first**.
+
+## 10b. SLIM RECOVERY IMAGE (29 MB → 9.0 MB)
+
+Built and statically verified 2026-09-19; **runtime (on-device) validation still pending**.
+
+```bash
+bash scripts/build-recovery-slim.sh      # → recovery-slim-out/recovery-slim.itb (+ .sha256, .manifest)
+```
+
+| metric | stock recovery | slim recovery |
+|---|---|---|
+| `.itb` size | 29,360,128 B | **9,437,184 B (9.0 MB)** |
+| kernel (lzma) | 6.0 MB | 4.33 MB |
+| initrd (XZ) | 24.7 MB | **4.61 MB** |
+| **unpacked (= RAM cost)** | **~95 MB → OOM** | **20.5 MB** |
+| packages | 352 | 117 |
+| FIT config name | `config-1` | `config-1` (compatible with `bootm $loadaddr#config-1`) |
+
+Mechanism: the `-recovery.itb` shares the production package set, so the script temporarily swaps `.config`
+with the 44-entry keep list (`scripts/recovery-slim-packages.txt`), runs `make` (world — note: **this tree has no
+`image` target**), then restores `.config` via a `trap` (fires on failure/Ctrl-C too). No source-tree patches.
+
+Keep-list must include the **boot artifact packages** or the image build fails immediately:
+`trusted-firmware-a-mt7981-spim-nand-ddr3` (→ `preloader.bin`), `u-boot-mt7981_jcg_q30-pro` (→ `bl31-uboot.fip`).
+
+Verify on device: boot it via TFTP (boot menu `2. Boot system via TFTP` = `tftpboot $bootfile && bootm`),
+then `free -m` (expect ≥150 MB free), `ubinfo -a`, `mtd -h`, `sysupgrade -h`, and a LuCI sysupgrade round-trip.
 
 ## 11. VERIFICATION CHECKLIST (per unit)
 

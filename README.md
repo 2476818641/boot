@@ -171,7 +171,7 @@ make -j$(nproc) V=s
 | 文件 | 大小 | 用途 |
 |---|---|---|
 | `...-squashfs-sysupgrade.itb` | 33866011 | 正式固件 → 写 `fit` 卷（或 LuCI 升级）|
-| `...-initramfs-recovery.itb` | 29360128 | 内存系统（⚠️ 本机 256MB 内存会 OOM，不建议用）|
+| `...-initramfs-recovery.itb` | 29360128 | 内存系统。⚠️ 默认 29MB 版在 256MB 内存上会 OOM，请改用 `scripts/build-recovery-slim.sh` 生成的 **9.0MB 精简版**（解包仅 20.5MB）|
 | `...-bl31-uboot.fip` | 1073444 | U-Boot 本体 → 写 `fip` 分区 |
 | `...-preloader.bin` | 230232 | BL2 → 写 `bl2` 分区（通常不用）|
 | `mt7981-ram-ddr3-bl2.bin` | 210368 | **给 mtk_uartboot 的 RAM BL2**（不是 preloader！）|
@@ -192,7 +192,7 @@ bdb2493e36a169c652875529ee7d1e8ee7f1f064d5fa526fde36a1980676df35  mt7981-ram-ddr
 
 **本仓库只放源码与构建配方，不含任何编译产物。**
 
-- ✅ 包含：完整 ImmortalWrt 源码树（已导入 MTK mt798x feeds）、`.config`（构建配方）、`feeds.conf`、镜像补丁、`docs/`
+- ✅ 包含：完整 ImmortalWrt 源码树（已导入 MTK mt798x feeds）、`.config`（构建配方）、`feeds.conf`、镜像补丁、`docs/`、精简 recovery 构建脚本
 - ❌ 不含：`bin/` `build_dir/` `staging_dir/` `dl/` `tmp/` `logs/` `feeds/` `*.itb` `*.ipk` `build.log`、任何密钥
 
 ---
@@ -205,8 +205,18 @@ bdb2493e36a169c652875529ee7d1e8ee7f1f064d5fa526fde36a1980676df35  mt7981-ram-ddr
 | **菜单写 NAND** | `5` 写正式固件 / `6` 写 recovery / `7` 写 FIP / `8` 写 BL2 | 不想敲命令 |
 | **mtk_uartboot** | 本 README「快速开始」第 1 步 | **终极保命**，BL2/FIP 全坏也能救 |
 
-⚠️ **不要用「按住 reset」救砖**：本机 256MB 内存跑 29MB 的 recovery initramfs 必然 OOM，
-会陷入「启动 → 崩溃 → 再启动」循环，还会反复写 NAND。
+⚠️ **「按住 reset」救砖要用精简 recovery 镜像**：
+原版 recovery 是 29MB、解包约 95MB，本机 256MB 内存**必然 OOM**，
+会陷入「启动 → 崩溃 → 再启动」循环并反复写 NAND。
+
+用下面这条生成 **9.0MB 精简版**（解包仅 20.5MB），替换 TFTP 目录里的同名文件后即可：
+
+```bash
+bash scripts/build-recovery-slim.sh      # 产物：recovery-slim-out/recovery-slim.itb
+```
+
+替换后：**按住 reset → U-Boot 自动 TFTP 拉取 → 进内存系统 → 浏览器刷固件（全程不需要串口）**。
+详见 [docs/jcg-q30-pro/RECOVERY-SLIM-PLAN.md](docs/jcg-q30-pro/RECOVERY-SLIM-PLAN.md)。
 
 ---
 
