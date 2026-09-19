@@ -180,7 +180,7 @@ bash scripts/build-recovery-slim.sh               # 完整重来：正式构建 
 | TFTP 完全没请求 | 网卡 IP 不对 / 防火墙把新网段判成"公用" | 网卡设 `.254`；防火墙专用+公用都放行 |
 | 自加的 `luci-app-ua2f` 编译后没生效 | 同名时 **luci feed 的版本覆盖本地 `package/` 的版本** | `./scripts/feeds uninstall luci-app-ua2f`（本地版生效）或直接用官方 JS 版 |
 | 以 root 编译报 `tools/tar failed to build` | GNU tar 的 configure 拒绝 root 身份 | `export FORCE_UNSAFE_CONFIGURE=1` 再编译 |
-| **云端编译（Actions）出来的固件里没有 UA2F** | 2026-09-19 第一次云端构建：`.config` 选了 380 个包，`make defconfig` 之后静默只剩 ~299，`ua2f`/`passwall`/`mwan3`/`smartdns`/`argon` 全被丢掉，而工作流仍然绿灯发 Release | 仓库已加校验：`scripts/check-package-selection.sh`（defconfig 后 + 产物 manifest 各查一次，缺关键包直接失败）。**自己下到固件后先看 `*.manifest` 里有没有 `ua2f`**；没有就别刷，或改用本地编译 |
+| **云端编译（Actions）出来的固件里没有 UA2F** | **`./scripts/feeds update -a` 结尾会偷偷跑一次 `make defconfig` 改写 `.config`**，而那时 `package/feeds/` 还没建好（全新检出里它被 .gitignore 忽略）→ 所有"来自 feed 的已选包"被静默删掉（380 → 292），后面 install/defconfig 都救不回来。第一次云端构建就是这样发出了一个没有 UA2F 的固件，工作流还是绿灯 | 仓库已修：工作流在 feeds 步骤前备份 `.config`、之后还原，并用 `scripts/check-package-selection.sh` 两道校验把丢包变成失败。**自己下到固件后先 `grep '^ua2f ' *.manifest`** 确认；本地编译则注意"先装 feeds，再改 .config"" |
 
 ---
 

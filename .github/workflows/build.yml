@@ -77,25 +77,39 @@ jobs:
           restore-keys: |
             dl-
 
-      - name: 更新并安装 feeds
+      # ⚠️ 这里有个大坑（2026-09-19 实测踩到，云端固件因此丢掉了 ua2f）：
+      #    `./scripts/feeds update -a` 在结尾会调用 scripts/feeds 里的 refresh_config()，
+      #    也就是**偷偷跑一次 `make defconfig`** 改写 .config。而此刻 package/feeds/ 还没建好
+      #    （它被 .gitignore 忽略，全新检出时不存在），于是 defconfig 只看得到树内的包，
+      #    所有"来自 feed 的已选包"被静默从 .config 删除（380 -> 292），
+      #    后面的 install 和正式 defconfig 都救不回来 —— 因为 =y 那几行已经没了。
+      #    对策：把提交进仓库的 .config 先备份，feeds 装完后原样还原。
+      - name: 更新并安装 feeds（保护 .config 不被 feeds 脚本改写）
         run: |
+          cp -f .config .config.committed
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+          if ! cmp -s .config .config.committed; then
+            echo "::warning::scripts/feeds 改写了 .config（内部 refresh_config 跑了 defconfig）"
+            echo "  改写前选中包数: $(grep -c '^CONFIG_PACKAGE_.*=y$' .config.committed)"
+            echo "  改写后选中包数: $(grep -c '^CONFIG_PACKAGE_.*=y$' .config)"
+            cp -f .config.committed .config
+            echo "  已还原为仓库里的 .config"
+          else
+            echo "scripts/feeds 没有改写 .config ✅"
+          fi
 
       - name: 应用 .config
         run: |
-          cp -f .config .config.requested      # 留一份"我想要什么"，用于下面的丢包校验
           make defconfig 2>&1 | tee defconfig.log
           echo "=== 目标机型 ==="
           grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|PROFILE)=' .config
 
-      # 2026-09-19 的第一次云端构建就栽在这里：.config 里选了 380 个包，
-      # defconfig 之后静默只剩 ~299 个（ua2f / passwall / mwan3 / smartdns / argon 全没了），
-      # 但工作流一路绿灯还发了 Release —— 云端固件没有防检测功能却没人知道。
-      # 这一步把"静默丢包"变成硬失败，并打印被丢掉的包清单。
+      # 把"静默丢包"变成硬失败：拿仓库里提交的那份 .config 和 defconfig 之后的结果对比，
+      # 缺任何一个关键包（ua2f 等）就直接失败，并打印被丢掉的包清单。
       - name: 校验包选择（防止 defconfig 静默丢包）
         run: |
-          bash scripts/check-package-selection.sh --config .config.requested .config
+          bash scripts/check-package-selection.sh --config .config.committed .config
 
       - name: 预下载源码
         run: make -j$(nproc) download
@@ -177,6 +191,8 @@ jobs:
           path: |
             build.log
             defconfig.log
+            .config.committed
+            .config
             recovery-slim-build.log
             build-production.log
             logs/

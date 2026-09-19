@@ -343,38 +343,51 @@ Verify on device: boot it via TFTP (boot menu `2. Boot system via TFTP` = `tftpb
 then `free -m` (expect ≥150 MB free), `ubinfo -a`, `mtd -h`, `sysupgrade -h`, and a LuCI sysupgrade round-trip.
 Only after that may the docs change from "statically verified" to "on-device verified".
 
-## 10c. ⚠️ CLOUD BUILD ONCE SHIPPED A FIRMWARE WITHOUT UA2F (silent package drop)
+## 10c. ⚠️ `scripts/feeds update` SILENTLY WIPES YOUR PACKAGE SELECTION (ua2f was lost this way)
 
-Evidence from Actions run #1 (2026-09-19, commit `2cbe18ff`, release `build-20260919-0910`):
+**Root cause (confirmed 2026-09-19, Actions run #2):**
 
-| fact | value |
-|---|---|
-| `.config` in the pushed tree | 380 `CONFIG_PACKAGE_*=y` (verified via raw.githubusercontent at that SHA; `ua2f=y`, `luci-app-passwall=y`) |
-| image manifest in the release | **299 packages**, and **no `ua2f` / `luci-app-ua2f` / `luci-app-passwall` / `mwan3` / `smartdns` / `luci-theme-argon`** |
-| compile log | only 18 `feeds/*` packages compiled (luci-base + mods + bootstrap theme + cgi-io); `ua2f` never built |
-| sysupgrade size | 19,005,716 B vs 33,866,011 B for the same `.config` built locally |
-| workflow status | **success**, Release published — nothing flagged the loss |
+`./scripts/feeds update -a` finishes by calling `refresh_config()` (in `scripts/feeds`, tail of `sub update`),
+which runs **`make defconfig` on the existing `.config`**. On a fresh checkout `package/feeds/` does not exist
+yet (it is `.gitignore`d), so that defconfig only sees in-tree packages and **silently deletes every
+`CONFIG_PACKAGE_<feed-package>=y` line**: 380 → **292**. `./scripts/feeds install -a` then populates
+`package/feeds/`, but the selection is already gone; the workflow's own `make defconfig` afterwards can only
+re-add defaults (→ **334**), never the user's picks. `refresh_config()` is invisible — it swallows output
+(`>/dev/null 2>&1`) and only touches `.config`.
 
-Reproduction attempts (same `.config`, feeds at the same branch tips, `./scripts/feeds install -a`
-→ 2038 installs like CI, `make defconfig`):
-- local VPS, old feeds (2026-05-26 checkouts): **380 kept**, `ua2f=y` survives ✅
-- local VPS, freshly cloned feeds at `openwrt-25.12` tips (2026-09): **381 kept**, `ua2f=y` survives ✅
-- repeated `make defconfig`: idempotent, no drops ✅
-So the trigger was **environment-specific to the runner** and is still unexplained; the post-defconfig
-`.config` of that run was never uploaded, so it cannot be inspected retroactively.
+Timeline of the two cloud runs:
 
-Mitigation now in the repo (committed):
+| | run #1 (`2cbe18ff`, release `build-20260919-0910`) | run #2 (`9e84508b`, guard added) |
+|---|---|---|
+| `.config` before feeds step | 380 packages (`ua2f=y`, `luci-app-passwall=y` — verified via raw.githubusercontent) | 380 |
+| after `feeds update -a` | **292** (silent, nothing logged) | **292** (guard now prints it) |
+| after workflow `make defconfig` | 334 | 334 |
+| shipped image | **299 packages, no `ua2f` / `luci-app-ua2f` / `luci-app-passwall` / `mwan3` / `smartdns` / `luci-theme-argon`**, sysupgrade 19.0 MB vs 33.9 MB locally | **build failed** (`❌ 缺失: ua2f …`) ✅ |
 
-```text
-scripts/required-packages.txt            # ua2f, luci-app-ua2f, kmod-mt_wifi, luci-app-passwall, ...
-scripts/check-package-selection.sh       # --config <requested> <effective> | --manifest <file>
-.github/workflows/build.yml              # runs the check right after defconfig AND on the final manifest
+Guard output that exposed it:
+`选中包数：期望 292 -> 实际 334` + `❌ 缺失: ua2f, luci-app-ua2f, luci-theme-argon, luci-app-passwall, mwan3, smartdns`.
+
+Local confirmation of the intermediate number: `make defconfig` in a tree **without** `package/feeds`
+(= exactly the state `feeds update` defconfigs in) keeps **292** packages — same figure.
+
+**Fix applied in `.github/workflows/build.yml`:**
+
+```yaml
+cp -f .config .config.committed      # before feeds
+./scripts/feeds update -a
+./scripts/feeds install -a
+cmp -s .config .config.committed || cp -f .config.committed .config   # undo the silent rewrite
+make defconfig
+bash scripts/check-package-selection.sh --config .config.committed .config
 ```
-The `--config` mode also prints every package `make defconfig` dropped, so the next run that misbehaves
-will show the dropped list (and its `defconfig.log` is uploaded on failure).
 
-Rule for anyone touching the build: **never trust "the workflow is green"** — verify the produced
-`*.manifest` actually contains `ua2f` (`bash scripts/check-package-selection.sh --manifest <file>`).
+Rules for anything that touches the build:
+- **Never let `scripts/feeds update` run on a `.config` you care about** without a backup/restore around it
+  (same for `./scripts/feeds uninstall`, which also calls `refresh_config()`).
+- After a cloud build, verify the produced `*.manifest`: `grep '^ua2f ' *.manifest`
+  or `bash scripts/check-package-selection.sh --manifest <file>`.
+- Local builds are unaffected as long as packages were installed from feeds **before** `.config` was edited
+  (the user's own tree is in that state), but a fresh clone + `feeds update -a` will eat the config.
 
 ---
 

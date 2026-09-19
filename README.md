@@ -156,17 +156,22 @@ run boot_production
 - **自动产出精简 recovery**：正式构建后追加一遍 `scripts/build-recovery-slim.sh --slim-only`（复用工具链，
   +20~40 分钟），把 29MB 原版 recovery 换成 **9.0MB 精简版**并重建 `sha256sums`，
   工作流还会校验体积（>12MB 直接判失败）
-- **防静默丢包**：`scripts/check-package-selection.sh` 在 `make defconfig` 之后和产物出来后各查一次
-  (`scripts/required-packages.txt`)，缺 `ua2f` 等关键包**直接让构建失败**，而不是发一个没有防检测功能的固件
+- **防静默丢包**：工作流在 `feeds update/install` 前后备份并还原 `.config`（否则被 `refresh_config`
+  里的 defconfig 吃掉），再用 `scripts/check-package-selection.sh` 在 `make defconfig` 之后和产物出来后
+  各查一次（对照 `scripts/required-packages.txt`），缺 `ua2f` 等关键包**直接让构建失败**，
+  而不是发一个没有防检测功能的固件
 - **编译失败时**自动上传 `build.log` 与 `logs/` 供排查
 
-> ⚠️ **重要：云端构建曾经静默丢掉 UA2F。**
-> 2026-09-19 的第一次云端构建（release `build-20260919-0910`）虽然显示成功，但产物里**没有 `ua2f`**：
-> `.config` 明确选了 380 个包，`make defconfig` 之后只剩 ~299 个，`ua2f` / `passwall` / `mwan3` /
-> `smartdns` / `argon` 全被丢掉，而工作流一路绿灯。
-> 现在工作流已加入两道硬校验（defconfig 之后 + 产物 manifest 之后），缺关键包直接失败并打印被丢掉的包清单；
-> 你自己下固件后也可以核对：`bash scripts/check-package-selection.sh --manifest <manifest 文件>`，
-> 或直接 `grep '^ua2f ' *.manifest`。
+> ⚠️ **重要：`scripts/feeds update -a` 会静默改写 `.config`（云端构建因此丢过 ua2f）。**
+> 这个命令结尾会调用 `refresh_config()`，也就是偷偷跑一次 `make defconfig`；而全新检出里
+> `package/feeds/` 还不存在（被 .gitignore 忽略），于是**所有"来自 feed 的已选包"被静默删掉
+> （380 → 292）**，之后 `feeds install` 和正式 `make defconfig` 都救不回来。
+> 2026-09-19 的第一次云端构建（release `build-20260919-0910`）就是这样发了一个**没有 `ua2f`** 的固件，
+> 而工作流一路绿灯（同 .config 本地编译是 352 个包 / 33.9MB，云端只有 299 个包 / 19.0MB）。
+>
+> 现在工作流已在 feeds 步骤前后备份/还原 `.config`，并用 `scripts/check-package-selection.sh`
+> 把"丢包"变成硬失败（defconfig 之后 + 产物 manifest 之后各查一次）。
+> 自己下固件后也可以核对：`grep '^ua2f ' *.manifest`。
 >
 > 提示：本仓库只存源码，CI 需要完整跑一次工具链 + 380 个包，首次较慢属正常。
 
