@@ -23,6 +23,8 @@ bash scripts/build-recovery-slim.sh --slim-only  # 正式产物已存在，只�
 
 1. 备份 `.config` → `.config.production`（并装 `trap`，失败 / Ctrl-C 也会自动还原）
 2. 【默认模式】`make` 正式构建，把 `bin/targets/.../` 里除 recovery、`sha256sums` 外的产物先存起来
+   然后检查这份「正式固件」的大小：**小于 20MB 直接拒绝继续**（那说明它其实是精简配置编出来的，
+   正常 380 包配置约 33.9MB；确实要硬来就加 `FORCE_SLIM_OK=1`）
 3. 按 `scripts/recovery-slim-packages.txt`（44 项保留清单）生成 `.config.slim`，`make defconfig` 自动补齐依赖
 4. 切到精简配置再 `make`（复用工具链与 `dl/` 缓存；world —— **本树没有 `image` 目标**）
 5. 装配最终产物：正式固件/fip/preloader 放回，**精简 recovery 覆盖同名文件**，重建 `sha256sums`

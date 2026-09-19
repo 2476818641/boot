@@ -90,6 +90,29 @@ regen_sums() {
 	  while read -r f; do sha256sum -b "$f"; done > sha256sums )
 }
 
+# 合理性检查：正式固件不该这么小。
+# 教训（2026-09-19）：以前脚本不会保护正式产物，一次精简 pass 之后
+# bin/targets/.../ 里躺着的是**精简配置**编出来的 11.4MB "正式固件"，
+# 而 380 包正式配置的产物是 33.9MB。若此时用 --slim-only，脚本会把这份
+# 11.4MB 当成"正式产物"再装回去 —— 装配出来的固件缺 wifi/ua2f 等一大堆包。
+check_production_size() {
+	SU="$(ls -1 "$1"/*-squashfs-sysupgrade.itb 2>/dev/null | head -1)" || true
+	if [ -z "${SU:-}" ]; then
+		warn "没找到 *-squashfs-sysupgrade.itb，跳过正式产物合理性检查"
+		return 0
+	fi
+	SZ=$(stat -c%s "$SU")
+	echo "    正式固件：$(basename "$SU") = $SZ 字节"
+	if [ "$SZ" -lt 20000000 ]; then
+		warn "这份『正式固件』只有 $SZ 字节（< 20MB），看起来是**精简配置**编出来的："
+		warn "  380 包正式配置的 sysupgrade 约 33.9MB；精简配置只有 ~11MB。"
+		warn "  继续下去，装配出的产物集里『正式固件』会缺 wifi / ua2f / passwall 等包。"
+		warn "  建议先跑默认模式完整编译：bash scripts/build-recovery-slim.sh"
+		[ "${FORCE_SLIM_OK:-0}" = "1" ] || die "拒绝继续（确实想这么做就加 FORCE_SLIM_OK=1 重跑）"
+		warn "FORCE_SLIM_OK=1：按你的要求继续。"
+	fi
+}
+
 TOTAL=6
 [ "$MODE" = "slim-only" ] && TOTAL=5
 step() { printf '\n\033[1;32m==> %s/%s %s\033[0m\n' "$1" "$TOTAL" "$2"; }
@@ -115,11 +138,13 @@ if [ "$MODE" = "full" ]; then
 	build "$PROD_LOG"
 	step $N "保存正式产物（recovery 稍后用精简版替换）"; N=$((N+1))
 	save_artifacts "$ART_BAK"
+	check_production_size "$ART_BAK"
 	ls -1 "$ART_BAK" 2>/dev/null | sed 's/^/    /' || true
 else
 	step $N "检查已有正式产物（--slim-only 模式）"; N=$((N+1))
 	[ -d "$DEVICE_DIR" ] || warn "$DEVICE_DIR 不存在：将只产出精简 recovery，产物集不完整"
 	save_artifacts "$ART_BAK"
+	check_production_size "$ART_BAK"
 fi
 
 # ---------- 生成精简配置 ----------

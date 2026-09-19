@@ -381,6 +381,29 @@ make defconfig
 bash scripts/check-package-selection.sh --config .config.committed .config
 ```
 
+**Verified end-to-end by Actions run #3 (`44b71204`, 2026-09-19), actual log lines:**
+
+```text
+[step 7] ##[warning]scripts/feeds 改写了 .config（内部 refresh_config 跑了 defconfig）
+         改写前选中包数: 380
+         改写后选中包数: 292          <- matches the prediction exactly
+[step 9] 选中包数：期望 380 -> 实际 381
+         ✅ 全部存在（15 项）
+[step 12] 精简构建：选中包数 121
+release build-20260919-1049:
+   production manifest 353 packages  (broken run #1: 299)
+   ua2f / luci-app-ua2f / luci-app-passwall / mwan3 / smartdns / luci-theme-argon / kmod-mt_wifi ... all present
+   sysupgrade 33,796,372 B  (run #1: 19,005,716 B)
+   recovery 9,437,184 B (= slim, 117 packages, mtd / ubi-utils / fitblk / kmod-mtd-rw / uboot-envtools present,
+   kmod-mt_wifi and ua2f correctly absent)
+```
+
+`build-20260919-0910` (run #1) is a **broken release — do not flash it**: the firmware has no `ua2f`.
+
+**CI vs local artifact hashes:** the kernel/U-Boot/BL2 embed build timestamps, so CI-built `.itb`/`.fip`/`.bin`
+hashes never match the locally built ones (same byte sizes, different sha256). Always compare against the
+`sha256sums` of the release you downloaded, never against the numbers in the README.
+
 Rules for anything that touches the build:
 - **Never let `scripts/feeds update` run on a `.config` you care about** without a backup/restore around it
   (same for `./scripts/feeds uninstall`, which also calls `refresh_config()`).

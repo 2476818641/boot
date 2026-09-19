@@ -211,9 +211,11 @@ bf9724f7eb8c0ddddf1f8fc9d6c104d892c09621125ada137ca6b7447543cc7d  ...-preloader.
 9e5431cce4ec06afde6bf216c8d31fdfa1b8ef3443aa6c86523ad22a1a12b059  mt7981-ram-ddr3-bl2.bin
 ```
 
-> ⚠️ 上面是**本次构建**的校验值。`fip` / `preloader` / RAM-BL2 里内嵌了编译时间戳
+> ⚠️ 上面是**本地这次构建**的校验值。`fip` / `preloader` / RAM-BL2 / 内核里内嵌了编译时间戳
 > （`strings bl2 | grep Built` → `Built : 08:30:16, Sep 19 2026`），所以**你重新编译后哈希会变**，
-> 体积基本不变。判断文件对不对看体积 + 来源，校验以你自己那次构建的 `sha256sums` 为准。
+> 体积基本不变；**云端（GitHub Actions）编出来的哈希也一定与这里不同**（同样的字节数、不同的 sha256）。
+> 判断文件对不对看体积 + 来源，校验一律以**你下载的那个 Release 里的 `sha256sums`**（或自己构建目录里的
+> `sha256sums`）为准。
 
 ---
 
