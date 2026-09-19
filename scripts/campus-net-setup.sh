@@ -32,6 +32,9 @@ WAIT_SECS="${WAIT_SECS:-20}"
 TTL_VALUE="${TTL_VALUE:-64}"
 TTL_FILE="${TTL_FILE:-/etc/nftables.d/10-ttl-fix.nft}"
 SYSFS="${SYSFS:-/sys/class/net}"		# 可覆盖，便于测试
+HOOKDIR="${HOOKDIR:-/etc/hotplug.d/iface}"
+CRONTAB_FILE="${CRONTAB_FILE:-/etc/crontabs/root}"
+AUTH_SCRIPT="${AUTH_SCRIPT:-/etc/campus-portal-auth.sh}"
 LOG_TAG="campus-setup"
 PORTAL_SCRIPT="${PORTAL_SCRIPT:-}"
 CAMPUS_MODE="${CAMPUS_MODE:-}"
@@ -167,6 +170,12 @@ else
 		warn "找不到 $PORTAL_SCRIPT —— 先继续配置，稍后放上去再手动跑一次"
 		PORTAL_SCRIPT=""
 	fi
+	# 认证用的账号密码 / 认证接口地址（都可留空，稍后用 uci 补）
+	PORTAL_USER="${CAMPUS_USER:-}"; PORTAL_PASS="${CAMPUS_PASS:-}"
+	AUTH_URL_IN="${AUTH_URL:-}"
+	[ -z "$PORTAL_USER" ] && { ask "    认证账号（学号，可留空稍后填）" "$(uget campus.main.user)"; PORTAL_USER="$REPLY"; }
+	[ -n "$PORTAL_USER" ] && [ -z "$PORTAL_PASS" ] && { ask "    认证密码" ""; PORTAL_PASS="$REPLY"; }
+	[ -z "$AUTH_URL_IN" ] && { ask "    认证接口地址（可留空，抓包后再填）" "$(uget campus.main.auth_url)"; AUTH_URL_IN="$REPLY"; }
 fi
 
 # ---------------------------------------------------------------- 2) 防识别四件套
@@ -294,6 +303,16 @@ else
 fi
 run uci commit network
 if [ -n "${UA2F_ENABLED:-}" ]; then run uci commit ua2f; fi
+if [ "$CAMPUS_MODE" = "portal" ]; then
+	run uci set campus.main='main'
+	[ -n "${PORTAL_USER:-}" ] && run uci set "campus.main.user=$PORTAL_USER"
+	[ -n "${PORTAL_PASS:-}" ] && run uci set "campus.main.pass=$PORTAL_PASS"
+	[ -n "${AUTH_URL_IN:-}" ] && run uci set "campus.main.auth_url=$AUTH_URL_IN"
+	run uci set "campus.main.iface=$WANIF"
+	run uci commit campus
+	[ "$DRY_RUN" = 1 ] || chmod 600 /etc/config/campus 2>/dev/null || true
+	msg "    认证参数已存到 uci campus（/etc/config/campus，权限 600）"
+fi
 
 if [ "$DRY_RUN" = 1 ]; then
 	printf '    [dry-run] /etc/init.d/network %s\n' "$([ "$OLD_PROTO" != "$NEW_PROTO" ] && echo restart || echo reload)"
@@ -318,6 +337,40 @@ else
 		fi
 	fi
 	log "applied: iface=$WANIF mode=$CAMPUS_MODE mac=${CLONE_MAC:-unchanged} mtu=${MTU:-unchanged} ttl=$TTL_VALUE ua2f=${UA2F_ENABLED:-none}"
+
+	if [ "$CAMPUS_MODE" = "portal" ]; then
+		ask "    装「WAN 上线自动认证 + 每 5 分钟兜底」吗（y/N）" "n"
+		case "$REPLY" in
+		y|Y|yes|是)
+			run mkdir -p "$HOOKDIR"
+			if [ "$DRY_RUN" = 1 ]; then
+				printf '    [dry-run] 写 %s/99-campus-portal（ifup 时调 %s）\n' "$HOOKDIR" "$AUTH_SCRIPT"
+				printf '    [dry-run] 往 %s 追加：*/5 * * * * %s --quiet\n' "$CRONTAB_FILE" "$AUTH_SCRIPT"
+			else
+				cat > "$HOOKDIR/99-campus-portal" <<-HOOK
+				#!/bin/sh
+				# campus-net-setup.sh 生成：WAN 一上线就调校园网认证脚本
+				# 完整版（带日志与重试）见仓库 scripts/campus-portal-autologin.sh
+				[ "\${ACTION:-}" = "ifup" ] || exit 0
+				case "\${INTERFACE:-}" in
+					wan|wwan) ;;
+					*) exit 0 ;;
+				esac
+				[ -x "$AUTH_SCRIPT" ] && ( sleep 5; "$AUTH_SCRIPT" --quiet ) &
+				HOOK
+				chmod +x "$HOOKDIR/99-campus-portal"
+				if ! grep -q "campus-portal-auth.sh" "$CRONTAB_FILE" 2>/dev/null; then
+					mkdir -p "$(dirname "$CRONTAB_FILE")"
+					echo "*/5 * * * * $AUTH_SCRIPT --quiet" >> "$CRONTAB_FILE"
+				fi
+				command -v /etc/init.d/cron >/dev/null 2>&1 && run /etc/init.d/cron restart
+				msg "    已装：$HOOKDIR/99-campus-portal + $CRONTAB_FILE 每 5 分钟兜底"
+				[ -x "$AUTH_SCRIPT" ] || warn "    还没放认证脚本：把它放到 $AUTH_SCRIPT 并 chmod +x"
+			fi
+			;;
+		*) msg "    跳过自动认证（随时可手动跑 $AUTH_SCRIPT）";;
+		esac
+	fi
 fi
 
 # ---------------------------------------------------------------- 4) 等 20 秒 → 测 → 认证
@@ -363,16 +416,10 @@ else
 				msg "    3) 账号已在别处登录，或需要先在认证页手动登一次"
 			fi
 		else
-			warn "没有验证脚本，只能帮你到这儿。自己去认证页登录一次，或者写一个："
-			cat <<-'EOF'
-			    验证脚本模板（存成 /etc/campus-portal-auth.sh，然后 chmod +x）：
-			      #!/bin/sh
-			      # 上面那行就是认证页地址；用 F12 → 网络 抓一次登录请求，照着抄字段：
-			      curl -s -o /dev/null -X POST 'http://认证页/登录接口' \
-			        -d 'user=学号&pass=密码&…'
-			      # 判断成功：拿到 204 就算通
-			      curl -s -o /dev/null -w '%{http_code}\n' http://connect.rom.miui.com/generate_204
-			EOF
+			warn "没有验证脚本，只能帮你到这儿。去下一份骨架，填 3 处就能用（见文件里的「← 抓包」）："
+			msg "    wget -O /etc/campus-portal-auth.sh <仓库>/scripts/campus-portal-auth.sh && chmod +x /etc/campus-portal-auth.sh"
+			msg "    骨架会读 uci campus 里的账号密码与认证地址，也支持开机自动登录（campus-portal-autologin.sh）"
+			msg "    认证参数现在填也可以：uci set campus.main.auth_url=... / user=... / pass=..."
 		fi
 	else
 		warn "PPPoE 没拨上：检查账号密码、是否需要 VLAN、以及 VLAN ID"
