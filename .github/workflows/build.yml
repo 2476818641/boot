@@ -77,7 +77,7 @@ jobs:
           restore-keys: |
             dl-
 
-      # ⚠️ 这里有个大坑（2026-09-19 实测踩到，云端固件因此丢掉了 ua2f）：
+      # ⚠️ 这里有个大坑（2026-09-19 实测踩到，云端固件因此丢掉了 ua2f —— 当时的 UA 方案）：
       #    `./scripts/feeds update -a` 在结尾会调用 scripts/feeds 里的 refresh_config()，
       #    也就是**偷偷跑一次 `make defconfig`** 改写 .config。而此刻 package/feeds/ 还没建好
       #    （它被 .gitignore 忽略，全新检出时不存在），于是 defconfig 只看得到树内的包，
@@ -106,7 +106,7 @@ jobs:
           grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|PROFILE)=' .config
 
       # 把"静默丢包"变成硬失败：拿仓库里提交的那份 .config 和 defconfig 之后的结果对比，
-      # 缺任何一个关键包（ua2f 等）就直接失败，并打印被丢掉的包清单。
+      # 缺任何一个关键包（ua3f 等）就直接失败，并打印被丢掉的包清单。
       - name: 校验包选择（防止 defconfig 静默丢包）
         run: |
           bash scripts/check-package-selection.sh --config .config.committed .config

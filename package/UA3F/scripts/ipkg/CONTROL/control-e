@@ -1,0 +1,10 @@
+Package: ua3f
+Version: 3.6.0-1
+Depends: luci-compat, ipset, iptables, iptables-mod-tproxy, iptables-mod-extra, iptables-mod-ipopt, iptables-mod-nfqueue, iptables-mod-conntrack-extra, kmod-nf-conntrack-netlink
+Source: /feed/openwrt
+SourceName: UA3F
+License: GPL-3.0-only
+Section: net
+SourceDateEpoch: 1711267200
+Architecture: all
+Description: Advanced HTTP Rewriting Tool

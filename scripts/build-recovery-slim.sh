@@ -29,6 +29,11 @@ set -eu
 TOPDIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$TOPDIR"
 
+# Go 模块代理：UA3F 是 Go 项目，编译时要拉依赖模块。
+# proxy.golang.org 在国内（本机）不通，这里兜底用 goproxy.cn；CI（海外）走它也没问题。
+# 想用别的代理：GOPROXY=... bash scripts/build-recovery-slim.sh
+export GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
+
 KEEP_FILE="scripts/recovery-slim-packages.txt"
 BAK=".config.production"
 SLIM=".config.slim"
@@ -94,7 +99,7 @@ regen_sums() {
 # 教训（2026-09-19）：以前脚本不会保护正式产物，一次精简 pass 之后
 # bin/targets/.../ 里躺着的是**精简配置**编出来的 11.4MB "正式固件"，
 # 而 380 包正式配置的产物是 33.9MB。若此时用 --slim-only，脚本会把这份
-# 11.4MB 当成"正式产物"再装回去 —— 装配出来的固件缺 wifi/ua2f 等一大堆包。
+# 11.4MB 当成"正式产物"再装回去 —— 装配出来的固件缺 wifi/UA3F 等一大堆包。
 check_production_size() {
 	SU="$(ls -1 "$1"/*-squashfs-sysupgrade.itb 2>/dev/null | head -1)" || true
 	if [ -z "${SU:-}" ]; then
@@ -106,7 +111,7 @@ check_production_size() {
 	if [ "$SZ" -lt 20000000 ]; then
 		warn "这份『正式固件』只有 $SZ 字节（< 20MB），看起来是**精简配置**编出来的："
 		warn "  380 包正式配置的 sysupgrade 约 33.9MB；精简配置只有 ~11MB。"
-		warn "  继续下去，装配出的产物集里『正式固件』会缺 wifi / ua2f / passwall 等包。"
+		warn "  继续下去，装配出的产物集里『正式固件』会缺 wifi / UA3F / passwall 等包。"
 		warn "  建议先跑默认模式完整编译：bash scripts/build-recovery-slim.sh"
 		[ "${FORCE_SLIM_OK:-0}" = "1" ] || die "拒绝继续（确实想这么做就加 FORCE_SLIM_OK=1 重跑）"
 		warn "FORCE_SLIM_OK=1：按你的要求继续。"

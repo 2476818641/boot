@@ -1,6 +1,6 @@
 # 必须存在于固件里的包（CI 会在编译前后各校验一次）
 #
-# 背景：2026-09-19 的云端构建（Actions run #1）**静默丢掉了 ua2f 及其同类包**：
+# 背景：2026-09-19 的云端构建（Actions run #1）**静默丢掉了 ua2f（当时的 UA 方案）及其同类包**：
 #   .config 里明明选中了 380 个包，但 `make defconfig` 之后只剩 ~299，
 #   产物 release 里没有 ua2f / luci-app-ua2f / passwall / mwan3 / smartdns / argon，
 #   而工作流一路绿灯（编译成功、发 Release）。也就是说云端固件**没有防检测功能**。
@@ -13,8 +13,8 @@
 # 每行一个包名；# 开头是注释。改 .config 时记得同步这里的关键项。
 
 # —— 校园网防检测（本项目的核心，绝对不能丢）——
-ua2f
-luci-app-ua2f
+# UA3F 自带 LuCI 页面（服务 → UA3F），所以不需要单独的 luci-app-* 包
+ua3f
 
 # —— 无线与硬件加速（MTK 私有驱动 + HNAT）——
 kmod-mt_wifi

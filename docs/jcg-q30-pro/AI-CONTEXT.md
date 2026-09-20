@@ -176,7 +176,7 @@ run boot_production
 ```
 
 Then in Linux: `df -h | grep overlay` (expect `/dev/ubi0_1` → `/overlay`, ~62 MiB), `hostname` = ImmortalWrt,
-`passwd`, enable UA2F in LuCI (Network → UA2F), then `reboot` and confirm autoboot works with keyboards untouched.
+`passwd`, enable UA3F in LuCI (Services → UA3F), then `reboot` and confirm autoboot works with keyboards untouched.
 
 ### Hardening (recommended once a unit is up)
 
@@ -253,40 +253,87 @@ Useful in-system checks: `df -h`, `mount | grep overlay`, `ubinfo -a`, `ip -4 ad
 
 ---
 
-## 8. UA2F (the actual purpose of the build)
+## 8. UA3F (the actual purpose of the build)
 
-- Packages in image: `ua2f 4.10.2-r1`, `luci-app-ua2f` (official JS version from `immortalwrt/luci`),
-  `luci-i18n-ua2f-zh-cn`.
-- LuCI page: **Network → UA2F** (`admin/network/ua2f`).
-- Shipped `/etc/config/ua2f` defaults: `enabled=0` (must be enabled), `handle_fw=1`,
-  `handle_tls=0`, `handle_intranet=1`, `custom_ua=''`, `disable_connmark='0'`.
-- Compiled-in UA (used when `custom_ua` is empty) = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
-  (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36 Edg/112.0.1722.68` (verified with `strings /usr/bin/ua2f`).
-- Runtime verification: `/etc/init.d/ua2f status`, `nft list table inet ua2f`
-  (expect postrouting chain, `queue num 10010`, `ct mark set 44` for tcp/80).
-- Kernel deps present: `kmod-nft-queue`, `kmod-nfnetlink-queue`, `nftables-json`, `libnetfilter-queue1`.
+Replaced UA2F with **UA3F** (2026-09-19). UA2F only rewrites the User-Agent via NFQUEUE; UA3F is a
+superset that also does L3 rewriting (TTL / IPID / TCP timestamp / TCP initial window / QUIC block),
+Desync (TCP segment reordering, obfuscation injection), optional HTTPS MitM, and eBPF offload.
 
-### Build-tree note (package override trap)
+| item | value |
+|---|---|
+| upstream | [SunBK201/UA3F](https://github.com/SunBK201/UA3F) 3.6.0, GPL-3.0-only, Go |
+| in this tree | vendored at `package/UA3F/` (upstream layout: Go sources at the root, OpenWrt package in `openwrt/`) |
+| local patch | `openwrt/Makefile`: `PKG_BUILD_DEPENDS:=golang/host luci-base/host` (upstream omits the `po2lmo` host dependency) — see `package/UA3F/LOCAL-NOTES.md` |
+| package symbol | `CONFIG_PACKAGE_ua3f` (lowercase!) |
+| deps (auto) | `iptables` (→`iptables-nft`), `iptables-mod-{tproxy,extra,ipopt,nfqueue,conntrack-extra}`, `ipset`, `luci-compat`, `kmod-nf-conntrack-netlink` |
+| LuCI | ships its own page inside the package: **Services → UA3F** (Lua/CBI + `luci-compat`) |
+| replaced | `ua2f`, `luci-app-ua2f`, `luci-i18n-ua2f-zh-cn` are no longer selected |
 
-`package/luci-app-ua2f/` (user's AGPL fork, Lua/CBI) is **NOT** the package that ships.
-`include/scan.awk` filters out core packages that a feed also provides (feature:
-"allow openwrt.git packages to be replaced by feeds"), so `feeds/luci/luci-app-ua2f` (official JS) wins.
-Verified via `tmp/.packagedeps` and `make package/luci-app-ua2f/clean` entering
-`feeds/luci/applications/luci-app-ua2f`. To build the fork instead: `./scripts/feeds uninstall luci-app-ua2f`.
+UCI schema (`/etc/config/ua3f`, shipped default `enabled=0`):
+
+```text
+ua3f.enabled.enabled        0        # must be enabled
+ua3f.main.server_mode       TPROXY   # HTTP | SOCKS5 | TPROXY | REDIRECT | NFQUEUE  (start with NFQUEUE)
+ua3f.main.port / bind       1080 / 0.0.0.0
+ua3f.main.ua                FFF      # replacement UA string
+ua3f.main.ua_regex, partial_replace, rewrite_mode (GLOBAL), log_level (WARN)
+ua3f.main.header_rewrite / body_rewrite / url_redirect   # JSON rule lists
+ua3f.main.l3_rewrite_ttl (0) l3_rewrite_ttl_value (64) l3_rewrite_ipid (0)
+ua3f.main.l3_rewrite_tcpts (0) l3_rewrite_tcpwin (0) l3_rewrite_block_quic (0) l3_rewrite_bpf_offload (0)
+ua3f.main.desync_reorder (0) desync_reorder_bytes (1500) desync_reorder_packets (8) desync_inject (0) desync_inject_ttl (3)
+ua3f.main.mitm_enabled (0) mitm_ca_p12_base64 / mitm_ca_passphrase / mitm_hostname / mitm_skip_verify
+```
+
+Shipped rule list rewrites most UAs to `FFF` but passes through MicroMessenger / Bilibili Freedoooooom /
+Steam clients, and rewrites the UA on `ua-check.stagoh.com` to `UA3F` (use that site to verify).
+
+Runtime checks: `/etc/init.d/ua3f status`, `pgrep -a ua3f`, `nft list ruleset | grep -i ua3f`,
+`logread -e ua3f`. The daemon programs its own nftables rules (no `handle_fw` UCI switch like UA2F had).
+
+Notes / gotchas:
+- L3 (TTL/IPID/TCP) rewriting only covers flows UA3F handles. The kernel-side nft rule from
+  [Login-edu](https://github.com/2476818641/Login-edu) (`/etc/nftables.d/10-ttl-fix.nft`, rewrites TTL on
+  every non-LAN egress) is independent — keep it as a full-coverage fallback.
+- Never run UA2F and UA3F at the same time.
+- HNAT / flow offload can bypass user-space rewriting — same caveat as with UA2F.
+- Go toolchain: needs `golang/host` (feed `packages/lang/golang`, default Go 1.26); the source tarball is
+  already in `dl/` (`go1.26.3.src.tar.gz`), so a full build needs no extra download.
+- eBPF offload needs kernel >= 5.15 (this target: 6.12 → available).
 
 ---
+
 
 ## 9. BUILD ENVIRONMENT (on the VPS, `/root/immortalwrt-mt798x-rebase`)
 
 ```yaml
 repo: ImmortalWrt rebase (MTK mt798x), branch 25.12, remote chasey-dev via ghproxy
 tree_state: HEAD == origin/25.12; only local edit = scripts/download.pl (ghproxy rewrite, now https?)
-build_cmd: export FORCE_UNSAFE_CONFIGURE=1 && make -j$(nproc) V=s   # root build: GNU tar configure refuses otherwise
-config: .config = mediatek/filogic/jcg_q30-pro + 380 packages; target device jcg_q30-pro only
+build_cmd: export FORCE_UNSAFE_CONFIGURE=1 && export GOPROXY=https://goproxy.cn,direct && make -j$(nproc) V=s
+           # FORCE_UNSAFE_CONFIGURE: root build, GNU tar configure refuses otherwise
+           # GOPROXY: UA3F is a Go package; proxy.golang.org is unreachable from this host, goproxy.cn works
+           # Go toolchain itself is already in dl/ (go1.26.3.src.tar.gz, hash matches the feed) → no extra download
+config: .config = mediatek/filogic/jcg_q30-pro + 378 packages; target device jcg_q30-pro only
 feeds: feeds.conf (untracked, gitignored) points all 5 feeds at https://cf.liuass.eu.org/ghproxy/https://github.com/...
 artifacts: bin/targets/mediatek/filogic/ (+ sha256sums, profiles.json, .manifest)
 rescue_dir: bin/tftp-stage/  (artifact hardlinks under candidate names, SHA256SUMS.txt, docs)
 cache: dl/ (~1.7 GB) warm; full build ~1–3 h, ~19 GB disk
+
+Kernel-state trap (hit 2026-09-20): kmod `KCONFIG` symbols are merged into the kernel config **only
+during the kernel build** (`include/kernel-defaults.mk:120-121` -> `package-metadata.pl kconfig` ->
+`.config.override`), and `$(STAMP_CONFIGURED)` is refreshed solely when `target/linux/compile` runs.
+Therefore, right after switching `.config` (production <-> slim recovery, or ua2f -> ua3f):
+
+- `make -j$(nproc)` (world) OK: reconfigures the kernel and rebuilds the modules
+- `make package/<something>/compile` FAILS: it does not enter `target/linux/compile`, so kmod packaging
+  runs against a stale kernel config and dies with e.g.
+  `ERROR: module '.../arch/arm64/crypto/sha512-arm64.ko' is missing.` -> `package/kernel/linux failed to build`
+  (exactly what happened when validating UA3F: the previous slim pass had left
+  `# CONFIG_CRYPTO_SHA512_ARM64 is not set`, while `CONFIG_PACKAGE_kmod-crypto-sha512=y` was back on)
+
+Safe fast path after a config switch: run `make target/linux/compile -j$(nproc)` first (refreshes the
+kernel config + builds every module), then `make package/<something>/compile`.
+Sanity check: `grep CONFIG_CRYPTO_SHA512_ARM64 build_dir/target-*/linux-*/linux-*/.config` (expect `=m`
+in the production config).
 ```
 
 Rebuild knobs discussed but NOT yet done:

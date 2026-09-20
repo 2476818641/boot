@@ -1,0 +1,33 @@
+FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS builder
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+
+COPY main.go ./
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+
+ARG TARGETOS
+ARG TARGETARCH
+
+RUN apk add --no-cache llvm clang linux-headers libbpf-dev
+RUN go generate ./...
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o ua3f
+
+FROM --platform=$BUILDPLATFORM alpine
+
+WORKDIR /app
+
+COPY --from=builder /app/ua3f .
+
+ENV UA3F_SERVER_MODE=SOCKS5
+ENV UA3F_PORT=1080
+ENV UA3F_REWRITE_MODE=GLOBAL
+ENV UA3F_PAYLOAD_UA=FFF
+ENV UA3F_UA_REGEX=
+ENV UA3F_PARTIAL_REPLACE=0
+
+EXPOSE 1080
+
+ENTRYPOINT ["/app/ua3f", "-b", "0.0.0.0"]

@@ -1,0 +1,93 @@
+package config
+
+import (
+	"fmt"
+	"os"
+
+	"go.yaml.in/yaml/v3"
+)
+
+func GenerateTemplateConfig(writeToFile bool) (Config, error) {
+	cfg := Config{
+		ServerMode:  "SOCKS5",
+		BindAddress: "127.0.0.1",
+		Port:        1080,
+
+		LogLevel: "info",
+
+		RewriteMode: "GLOBAL",
+
+		UserAgent:               "FFF",
+		UserAgentRegex:          "",
+		UserAgentPartialReplace: false,
+
+		IncludeLanRoutes: false,
+
+		L3Rewrite: L3RewriteConfig{
+			TTL:        false,
+			TTLValue:   DefaultTTL,
+			IPID:       false,
+			TCPTS:      false,
+			TCPWIN:     false,
+			BLOCKQUIC:  false,
+			BPFOffload: false,
+		},
+
+		Desync: DesyncConfig{
+			Reorder:        false,
+			ReorderBytes:   1500,
+			ReorderPackets: 8,
+			Inject:         false,
+			InjectTTL:      3,
+		},
+
+		MitM: MitMConfig{
+			Enabled:            false,
+			Hostname:           "",
+			CAP12:              "",
+			CAPassphrase:       "",
+			InsecureSkipVerify: false,
+		},
+
+		HeaderRules: []Rule{
+			{
+				Type:          "FINAL",
+				Action:        "REPLACE",
+				RewriteHeader: "User-Agent",
+				RewriteValue:  "FFF",
+			},
+		},
+
+		BodyRules: []Rule{
+			{
+				Type:             "URL-REGEX",
+				MatchValue:       "^http://ua-check.stagoh.com",
+				Action:           "REPLACE-REGEX",
+				RewriteDirection: "RESPONSE",
+				RewriteRegex:     "User-Agent",
+				RewriteValue:     "UA3F",
+			},
+		},
+
+		URLRedirectRules: []Rule{
+			{
+				Type:         "URL-REGEX",
+				MatchValue:   "^http://example.com/old-path",
+				Action:       "REDIRECT-302",
+				RewriteRegex: "http://example.com/old-path(.*)",
+				RewriteValue: "http://example.com/new-path$1",
+			},
+		},
+	}
+
+	if writeToFile {
+		data, err := yaml.Marshal(&cfg)
+		if err != nil {
+			return Config{}, fmt.Errorf("failed to marshal template config to YAML: %w", err)
+		}
+		if err := os.WriteFile("config.yaml", data, 0644); err != nil {
+			return Config{}, fmt.Errorf("failed to write template config to file: %w", err)
+		}
+	}
+	return cfg, nil
+}

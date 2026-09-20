@@ -1,0 +1,18 @@
+---
+name: Bug report
+about: Bug report
+title: ''
+labels: bug
+assignees: ''
+
+---
+
+我的 OpenWrt 发行版：
+
+我的 OpenWrt 发行版版本：
+
+我的 UA3F 版本：
+
+OpenWrt 有无同时运行 Clash 等代理客户端：
+
+请提供 UA3F 的 Debug 运行日志，并描述你的问题：

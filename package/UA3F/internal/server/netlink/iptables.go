@@ -1,0 +1,165 @@
+//go:build linux
+
+package netlink
+
+import (
+	"context"
+	"errors"
+	"strconv"
+
+	"github.com/coreos/go-iptables/iptables"
+	"github.com/sunbk201/ua3f/internal/daemon"
+	"github.com/sunbk201/ua3f/internal/netfilter"
+	"github.com/sunbk201/ua3f/internal/server/base"
+	"sigs.k8s.io/knftables"
+)
+
+const (
+	table       = "mangle"
+	POSTROUTING = "POSTROUTING"
+)
+
+func ruleTTL(ttl uint8) []string {
+	return []string{
+		"-m", "mark",
+		"!", "--mark", strconv.Itoa(base.SO_INJECT_MARK),
+		"-j", "TTL",
+		"--ttl-set", strconv.FormatUint(uint64(ttl), 10),
+	}
+}
+
+var RuleHookTCPSyn = []string{
+	"-p", "tcp",
+	"--tcp-flags", "SYN", "SYN",
+	"-j", "NFQUEUE",
+	"--queue-num", strconv.Itoa(netfilter.HELPER_QUEUE),
+	"--queue-bypass",
+}
+
+var RuleIP = []string{
+	"-p", "tcp",
+	"-j", "NFQUEUE",
+	"--queue-num", strconv.Itoa(netfilter.HELPER_QUEUE),
+	"--queue-bypass",
+}
+
+var RuleRstTimestamp = []string{
+	"-p", "tcp",
+	"--tcp-option", "8",
+	"-j", "TCPOPTSTRIP",
+	"--strip-options", "timestamp",
+}
+
+var RuleBlockQuic = []string{
+	"-p", "udp",
+	"--dport", "443",
+	"-j", "DROP",
+}
+
+func (s *Server) iptSetup() error {
+	ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4)
+	if err != nil {
+		return err
+	}
+	if s.cfg.TTL {
+		err = s.IptSetTTL(ipt)
+		if err != nil {
+			return err
+		}
+		if netfilter.FlowOffloadEnabled() {
+			err = s.IptSetTTLIngress(ipt)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if (s.cfg.TCPTS || s.cfg.TCPWIN) && !s.cfg.IPID {
+		err = s.IptHookTCPSyn(ipt)
+		if err != nil {
+			return err
+		}
+	}
+	if s.cfg.IPID {
+		err = s.IptSetIP(ipt)
+		if err != nil {
+			return err
+		}
+	}
+	if s.cfg.BLOCKQUIC {
+		err = s.IptBlockQUIC(ipt)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) iptCleanup() error {
+	ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4)
+	if err != nil {
+		return err
+	}
+	_ = ipt.DeleteIfExists(table, POSTROUTING, ruleTTL(s.cfg.TTLValue)...)
+	_ = ipt.DeleteIfExists(table, POSTROUTING, RuleIP...)
+	_ = ipt.DeleteIfExists(table, POSTROUTING, RuleHookTCPSyn...)
+	_ = ipt.DeleteIfExists(table, POSTROUTING, RuleBlockQuic...)
+	if s.cfg.TTL {
+		_ = s.NftCleanup()
+	}
+	return nil
+}
+
+func (s *Server) IptSetTTL(ipt *iptables.IPTables) error {
+	err := ipt.Append(table, POSTROUTING, ruleTTL(s.cfg.TTLValue)...)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) IptHookTCPSyn(ipt *iptables.IPTables) error {
+	err := ipt.Append(table, POSTROUTING, RuleHookTCPSyn...)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) IptSetIP(ipt *iptables.IPTables) error {
+	err := ipt.Append(table, POSTROUTING, RuleIP...)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) IptSetTTLIngress(ipt *iptables.IPTables) error {
+	if !daemon.IsCommandAvailable("nft") {
+		return errors.New("nft command not available")
+	}
+
+	nft, err := knftables.New(s.Nftable.Family, s.Nftable.Name)
+	if err != nil {
+		return err
+	}
+
+	tx := nft.NewTransaction()
+	tx.Add(s.Nftable)
+	if err := nft.Run(context.TODO(), tx); err != nil {
+		return err
+	}
+
+	lanDev, err := netfilter.GetLanDevice()
+	if err != nil {
+		return err
+	}
+	return s.NftSetTTLIngress(nft, s.Nftable, lanDev)
+}
+
+func (s *Server) IptBlockQUIC(ipt *iptables.IPTables) error {
+	err := ipt.Append(table, POSTROUTING, RuleBlockQuic...)
+	if err != nil {
+		return err
+	}
+	return nil
+}

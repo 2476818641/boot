@@ -1,0 +1,146 @@
+package statistics
+
+import (
+	"bufio"
+	"fmt"
+	"log/slog"
+	"os"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+type PassThroughRecordList struct {
+	recordAddChan   chan *PassThroughRecord
+	records         map[string]*PassThroughRecord
+	dumpWriter      *bufio.Writer
+	dumpFile        string
+	dumpRecords     []*PassThroughRecord
+	dumpInterval    time.Duration
+	cleanupInterval time.Duration
+	mu              sync.RWMutex
+}
+
+type PassThroughRecord struct {
+	LastSeen time.Time
+	SrcAddr  string
+	DestAddr string
+	UA       string
+	Count    int
+}
+
+func NewPassThroughRecordList(dumpFile string) *PassThroughRecordList {
+	return &PassThroughRecordList{
+		recordAddChan:   make(chan *PassThroughRecord, 100),
+		records:         make(map[string]*PassThroughRecord, 100),
+		mu:              sync.RWMutex{},
+		dumpRecords:     make([]*PassThroughRecord, 0, 100),
+		dumpFile:        dumpFile,
+		dumpWriter:      bufio.NewWriter(nil),
+		dumpInterval:    5 * time.Second,
+		cleanupInterval: 24 * time.Hour,
+	}
+}
+
+func (l *PassThroughRecordList) Run() {
+	go func() {
+		dumpTicker := time.NewTicker(l.dumpInterval)
+		cleanupTicker := time.NewTicker(l.cleanupInterval)
+		defer dumpTicker.Stop()
+		defer cleanupTicker.Stop()
+
+		for {
+			select {
+			case record := <-l.recordAddChan:
+				l.Add(record)
+			case <-dumpTicker.C:
+				l.Dump()
+			case <-cleanupTicker.C:
+				l.Cleanup()
+			}
+		}
+	}()
+}
+
+func (l *PassThroughRecordList) Add(record *PassThroughRecord) {
+	if record.UA == "" {
+		return
+	}
+
+	if strings.HasPrefix(record.UA, "curl/") {
+		record.UA = "curl/*"
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+
+	if r, exists := l.records[record.UA]; exists {
+		r.Count++
+		r.SrcAddr = record.SrcAddr
+		r.DestAddr = record.DestAddr
+		r.LastSeen = now
+	} else {
+		l.records[record.UA] = &PassThroughRecord{
+			SrcAddr:  record.SrcAddr,
+			DestAddr: record.DestAddr,
+			UA:       record.UA,
+			Count:    1,
+			LastSeen: now,
+		}
+	}
+}
+
+func (l *PassThroughRecordList) Cleanup() {
+	cutoff := time.Now().Add(-l.cleanupInterval)
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	for ua, record := range l.records {
+		if record.LastSeen.Before(cutoff) {
+			delete(l.records, ua)
+		}
+	}
+}
+
+func (l *PassThroughRecordList) Dump() {
+	f, err := os.Create(l.dumpFile)
+	if err != nil {
+		slog.Error("os.Create", slog.Any("error", err))
+		return
+	}
+	defer func() {
+		if err := f.Close(); err != nil {
+			slog.Error("os.File.Close", slog.Any("error", err))
+		}
+	}()
+
+	l.dumpRecords = l.dumpRecords[:0]
+	l.mu.RLock()
+	for _, r := range l.records {
+		l.dumpRecords = append(l.dumpRecords, r)
+	}
+	l.mu.RUnlock()
+
+	sort.SliceStable(l.dumpRecords, func(i, j int) bool {
+		return l.dumpRecords[i].Count > l.dumpRecords[j].Count
+	})
+
+	l.dumpWriter.Reset(f)
+	defer func() {
+		if err := l.dumpWriter.Flush(); err != nil {
+			slog.Error("bufio.Writer.Flush", slog.Any("error", err))
+		}
+	}()
+
+	for _, record := range l.dumpRecords {
+		_, err := fmt.Fprintf(l.dumpWriter, "%s %s %d %s\n",
+			record.SrcAddr, record.DestAddr, record.Count, record.UA)
+		if err != nil {
+			slog.Error("Dump fmt.Fprintf", slog.Any("error", err))
+		}
+	}
+}

@@ -1,7 +1,8 @@
 # ImmortalWrt MT798x · JCG Q30 Pro / Q30 · 硬刷方案
 
 面向 **MediaTek MT7981** 平台的自编译 ImmortalWrt 分支，主力机型 **JCG Q30 Pro / Q30**
-（同一块板，兼容 CMCC MR3000D-CIq），集成**校园网 UA2F 防检测**所需组件。
+（同一块板，兼容 CMCC MR3000D-CIq），集成**校园网 UA3F 防检测**所需组件
+（UA 改写 + L3 重写：TTL / IPID / TCP 时间戳 / TCP 初始窗口 + Desync）。
 
 > ## ⚠️ 本项目为「硬刷方案」
 >
@@ -28,7 +29,7 @@
 | 兼容机型 | `jcg,q30-pro`、`jcg,q30`、CMCC `MR3000D-CIq`（同一镜像）|
 | 包管理器 | **apk**（OpenWrt 25.x 起由 opkg 切换）|
 | 选中包数 | **380** |
-| 关键组件 | `ua2f 4.10.2` + 官方 JS 版 `luci-app-ua2f` + 中文界面；mtwifi 私有驱动；HNAT 硬件加速；mwan3 / passwall / smartdns / turboacc-mtk |
+| 关键组件 | **`UA3F 3.6.0`**（高级 HTTP(S) 重写代理：UA 改写 + L3 重写 TTL/IPID/TCP 时间戳/初始窗口 + Desync，LuCI 在「服务 → UA3F」）；mtwifi 私有驱动；HNAT 硬件加速；mwan3 / passwall / smartdns / turboacc-mtk |
 | flash 布局 | UBI 卷：`fit`（正式固件）/ `rootfs_data`（overlay）/ `ubootenv`、`ubootenv2` |
 
 ### 上游切点
@@ -135,7 +136,7 @@ run boot_production
 ```
 
 启动成功标志：**双蓝灯** + 浏览器 `192.168.1.1` 可访问。
-进系统后：`passwd` 设密码 → **网络 → UA2F → 启用**。
+进系统后：`passwd` 设密码 → **服务 → UA3F → 启用**。
 
 > **只换 `fip`，通常不写 `bl2`**：BL2 一般完好，少写一次少一层风险。
 > 写 `bl2` 前请确认 DDR 类型（本机为 DDR3）。
@@ -149,7 +150,8 @@ run boot_production
 ### 用法
 
 1. **Fork** 本仓库（或在本仓库直接改）
-2. 在网页上编辑 **`.config`**（例如换机型、加减包、改 `CONFIG_UA2F_USER_AGENT_STRING`）
+2. 在网页上编辑 **`.config`**（例如换机型、加减包）。注：UA 串不用改 .config —— UA3F 是运行时在
+   「服务 → UA3F」里配的
 3. 提交后 **自动开始编译**（改动 `.config` / `feeds.conf` 会触发）；也可以去
    **Actions → Build ImmortalWrt (JCG Q30 Pro / Q30) → Run workflow** 手动触发
 4. 约 **3~5 小时**后（含精简 recovery 的第二遍编译），在该次运行的 **Artifacts** 里下载，
@@ -174,11 +176,11 @@ run boot_production
   工作流还会校验体积（>12MB 直接判失败）
 - **防静默丢包**：工作流在 `feeds update/install` 前后备份并还原 `.config`（否则被 `refresh_config`
   里的 defconfig 吃掉），再用 `scripts/check-package-selection.sh` 在 `make defconfig` 之后和产物出来后
-  各查一次（对照 `scripts/required-packages.txt`），缺 `ua2f` 等关键包**直接让构建失败**，
+  各查一次（对照 `scripts/required-packages.txt`），缺 `ua3f` 等关键包**直接让构建失败**，
   而不是发一个没有防检测功能的固件
 - **编译失败时**自动上传 `build.log` 与 `logs/` 供排查
 
-> ⚠️ **重要：`scripts/feeds update -a` 会静默改写 `.config`（云端构建因此丢过 ua2f）。**
+> ⚠️ **重要：`scripts/feeds update -a` 会静默改写 `.config`（云端构建因此丢过 ua2f，当时的 UA 方案）。**
 > 这个命令结尾会调用 `refresh_config()`，也就是偷偷跑一次 `make defconfig`；而全新检出里
 > `package/feeds/` 还不存在（被 .gitignore 忽略），于是**所有"来自 feed 的已选包"被静默删掉
 > （380 → 292）**，之后 `feeds install` 和正式 `make defconfig` 都救不回来。
@@ -187,9 +189,9 @@ run boot_production
 >
 > 现在工作流已在 feeds 步骤前后备份/还原 `.config`，并用 `scripts/check-package-selection.sh`
 > 把"丢包"变成硬失败（defconfig 之后 + 产物 manifest 之后各查一次）。
-> 自己下固件后也可以核对：`grep '^ua2f ' *.manifest`。
+> 自己下固件后也可以核对：`grep '^ua3f ' *.manifest`。
 >
-> 提示：本仓库只存源码，CI 需要完整跑一次工具链 + 380 个包，首次较慢属正常。
+> 提示：本仓库只存源码，CI 需要完整跑一次工具链 + 378 个包，首次较慢属正常。
 
 ---
 
@@ -200,6 +202,7 @@ run boot_production
 
 ```bash
 export FORCE_UNSAFE_CONFIGURE=1          # root 身份编译必需，否则 tools/tar 会失败
+export GOPROXY=https://goproxy.cn,direct # UA3F 是 Go 项目：proxy.golang.org 国内不通
 bash scripts/build-recovery-slim.sh      # 正式构建 → 精简 recovery → 汇总到 recovery-slim-out/
 # 只想重做精简 recovery（正式产物已在）：bash scripts/build-recovery-slim.sh --slim-only
 ```
@@ -281,7 +284,7 @@ OpenWrt 默认让 recovery 与正式固件共用同一套包（本仓库 380 个
 - 本仓库的 rebase 依托：[chasey-dev/immortalwrt-mt798x-rebase](https://github.com/chasey-dev/immortalwrt-mt798x-rebase)
 - 外部设备 HNAT 支持移植自 [Padavanonly's repo](https://github.com/padavanonly/immortalwrt-mt798x-6.6)
 - BROM 恢复工具：[981213/mtk_uartboot](https://github.com/981213/mtk_uartboot)
-- UA2F：[Zxilly/UA2F](https://github.com/Zxilly/UA2F)
+- UA3F（当前使用）：[SunBK201/UA3F](https://github.com/SunBK201/UA3F) —— 前身是 [Zxilly/UA2F](https://github.com/Zxilly/UA2F)，本方案已从 UA2F 换成 UA3F（UA2F 只做 UA 改写，UA3F 多了 L3 重写与 Desync）
 
 ### 外部设备 HNAT 说明（沿用上游）
 

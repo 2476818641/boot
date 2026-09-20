@@ -7,7 +7,7 @@
 # 规则：
 #   - 每行一个包名（OpenWrt 的 CONFIG_PACKAGE_ 之后的名字）
 #   - 依赖包不用写：make defconfig 会自动补齐
-#   - 不要放编译产物；不要放 ua2f / wifi 驱动 / 代理插件（它们是大户，recovery 不需要）
+#   - 不要放编译产物；不要放 ua3f / wifi 驱动 / 代理插件（它们是大户，recovery 不需要）
 #
 # 实测体积：正式 recovery 29MB（解包 ~95MB，必 OOM）→ 本清单 9.0MB（解包 20.5MB，117 个包）
 # ---- 系统基础 ----
