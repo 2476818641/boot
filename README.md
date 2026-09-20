@@ -178,7 +178,25 @@ run boot_production
   里的 defconfig 吃掉），再用 `scripts/check-package-selection.sh` 在 `make defconfig` 之后和产物出来后
   各查一次（对照 `scripts/required-packages.txt`），缺 `ua3f` 等关键包**直接让构建失败**，
   而不是发一个没有防检测功能的固件
-- **编译失败时**自动上传 `build.log` 与 `logs/` 供排查
+- **防「本地能编、云端编不过」**：`scripts/check-vendored-inputs.sh` 在检出后立刻检查
+  **编译需要的文件是否真的进了 git 仓库**（被 `.gitignore` 忽略的文件本地存在、云端没有），
+  1 秒失败而不是编一小时后失败
+- **编译失败时**自动上传 `build.log` 与 `logs/` 供排查，并用 `-j1 V=s` 增量重跑一次以取得真实报错
+  （并行构建默认只留一句 `ERROR: package/xxx failed to build.`，看不到根因）
+
+> ⚠️ **两个已经踩过的 CI 坑（都不要重犯）**
+>
+> **1. `make ... | tee build.log` 会吞掉编译失败的退出码**（管道退出码默认取 `tee` 的 0）。
+> 2026-09-20 的 run #5 就是这样：`make world` 早已失败，流水线却继续往下跑精简 pass，
+> 因为 `bin/targets` 里根本没有正式固件，装配阶段就把 **11MB 的精简固件当成「正式固件」**收集上传。
+> 现在：工作流加 `set -o pipefail`，`build-recovery-slim.sh` 在「找不到正式 `*-squashfs-sysupgrade.itb`」时
+> **直接失败**（除非显式 `FORCE_SLIM_OK=1`）。
+>
+> **2. 被 `.gitignore` 忽略的编译输入 = 只有云端会失败。**
+> UA3F 的 Go 代码用 `//go:embed tc_bpfeb.o` 把 4 个 eBPF 目标文件编进二进制，而仓库根 `.gitignore`
+> 的 `*.o` 规则把它们挡在仓库外：本地树里文件在（能编过），干净检出里没有 →
+> 云端 3 秒报 `pattern tc_bpfel.o: no matching files found`。
+> 现在这 4 个 `.o` 用 `git add -f` 强制入库，并由 `scripts/check-vendored-inputs.sh` 每次云端构建前校验。
 
 > ⚠️ **重要：`scripts/feeds update -a` 会静默改写 `.config`（云端构建因此丢过 ua2f，当时的 UA 方案）。**
 > 这个命令结尾会调用 `refresh_config()`，也就是偷偷跑一次 `make defconfig`；而全新检出里

@@ -461,6 +461,75 @@ Rules for anything that touches the build:
 
 ---
 
+## 10d. ⚠️ CI run #5 FAILURE (2026-09-20): a `.gitignore`d build input exists only on your machine
+
+**Symptom (Actions run #5, `8326fd0a`):** the `编译` step reported **success**, the job then died in
+`校验产物` with a manifest of **117 packages** (the slim recovery count) instead of ~350, and
+`❌ 缺失: ua3f` plus 9 other packages. The real build error was nowhere in `build.log`.
+
+**Two independent bugs, one masking the other:**
+
+1. **Root cause — 4 eBPF object files were never committed.**
+   `make -r world` had actually failed, at `make[3] -C package/UA3F/openwrt compile`, after ~3 seconds:
+
+   ```text
+    make[3] -C package/UA3F/openwrt compile
+       ERROR: package/UA3F/openwrt failed to build.
+   make -r world: build failed. Please re-run make with -j1 V=s or V=sc for a higher verbosity level
+   ```
+
+   UA3F embeds eBPF objects with `//go:embed tc_bpfeb.o` (upstream commits them; they are **build inputs**,
+   not leftovers). The repo root `.gitignore` line 1 is `*.o`, so a plain `git add` silently skipped them:
+   `git ls-tree -r HEAD package/UA3F | grep -c '\.o$'` → **0**, while the local tree had 285 files vs 281 tracked.
+   Proof of mechanism (reproduced locally with the vendored source, no OpenWrt build needed):
+
+   ```text
+   $ find . -name '*.o' -delete        # = what CI's clean checkout has
+   $ staging_dir/hostpkg/bin/go1.26 build ./...
+   internal/bpf/sockmap/sockmap_bpfel.go:138:12: pattern sockmap_bpfel.o: no matching files found
+   internal/bpf/tc/tc_bpfel.go:142:12: pattern tc_bpfel.o: no matching files found
+   $ cp <the 4 .o back> && go build ./internal/bpf/...   → exit 0
+   ```
+
+   This class of bug **cannot** be found by building locally: the files are present on the machine that
+   has ever copied the vendored tree, and absent in every clean clone. CI-only, always.
+
+2. **Masking bug — `make ... | tee build.log` returns tee's exit code (0).**
+   The workflow's compile step therefore never failed; the pipeline went on to the slim pass. At that point
+   `bin/targets/.../` had **no** `*-squashfs-sysupgrade.itb` at all, and `build-recovery-slim.sh --slim-only`
+   only *warned* about it (`没找到 ... 跳过正式产物合理性检查`) — so the slim pass then produced an 11 MB
+   sysupgrade from the **44-package slim config**, which was collected and would have been released as the
+   "production" firmware. Only the package-count check at the end caught it.
+
+**Fixes applied:**
+
+```text
+git add -f package/UA3F/internal/bpf/tc/tc_bpfeb.o tc_bpfel.o \
+           package/UA3F/internal/bpf/sockmap/sockmap_bpfeb.o sockmap_bpfel.o
+scripts/check-vendored-inputs.sh          # NEW: verifies each build input exists AND is tracked by git;
+                                          #      runs as CI step 2 (fails in ~1 s, not after an hour)
+.github/workflows/build.yml:
+  set -o pipefail                         # on 应用 .config / 编译 / 精简 recovery steps
+  编译 step on failure: make -j1 V=s 2>&1 | tail -120 | tee -a build.log ; exit 1
+                                          # parallel builds print only "ERROR: package/x failed to build."
+                                          # incremental, so this is cheap and yields the real error
+scripts/build-recovery-slim.sh:
+  check_production_size(): missing production sysupgrade is now a HARD failure
+  (unless FORCE_SLIM_OK=1) instead of a warning
+```
+
+**Rules for anything that touches the build (append to the §10 list):**
+- Any file the build *reads* must be tracked by git, not merely present on disk. Vendored trees with
+  binary artifacts (`.o`, `.a`, `.syso`, `vendor/`) are the usual victims of a broad `.gitignore`.
+  Run `bash scripts/check-vendored-inputs.sh` before pushing; compare
+  `git ls-files <dir> | wc -l` against `find <dir> -type f | wc -l`.
+- Never pipe `make` through `tee` without `set -o pipefail` — the failure disappears and you ship a
+  wrong artifact with a green checkmark.
+- When a step "succeeds" but a later step reports a suspiciously small manifest, check the *number of
+  entries* first: 117 = slim recovery, ~350 = production. That single number localizes the failure fast.
+
+---
+
 ## 11. VERIFICATION CHECKLIST (per unit)
 
 ```text

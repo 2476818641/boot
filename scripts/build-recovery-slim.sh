@@ -103,7 +103,13 @@ regen_sums() {
 check_production_size() {
 	SU="$(ls -1 "$1"/*-squashfs-sysupgrade.itb 2>/dev/null | head -1)" || true
 	if [ -z "${SU:-}" ]; then
-		warn "没找到 *-squashfs-sysupgrade.itb，跳过正式产物合理性检查"
+		# 教训（2026-09-20 CI run #5）：正式 make 失败被 `| tee` 吞掉（管道退出码是 tee 的 0），
+		# 流程继续走到精简 pass，此时 bin/targets 里**根本没有**正式固件；装配阶段
+		# 就把 11MB 的精简固件当成"正式固件"收集上传。这里必须硬失败。
+		warn "没找到 *-squashfs-sysupgrade.itb —— 正式固件根本没编出来"
+		warn "  常见原因：上一步 make 失败但被管道吞掉了退出码（make | tee 的退出码默认取 tee 的 0，要 set -o pipefail）"
+		[ "${FORCE_SLIM_OK:-0}" = "1" ] || die "拒绝继续（确实只想产出精简 recovery 就加 FORCE_SLIM_OK=1 重跑）"
+		warn "FORCE_SLIM_OK=1：按你的要求继续 —— 产物集里的『正式固件』将不可用。"
 		return 0
 	fi
 	SZ=$(stat -c%s "$SU")

@@ -20,9 +20,11 @@ on:
     paths:
       - '.config'
       - 'feeds.conf'
+      - 'package/UA3F/**'
       - 'scripts/build-recovery-slim.sh'
       - 'scripts/recovery-slim-packages.txt'
       - 'scripts/check-package-selection.sh'
+      - 'scripts/check-vendored-inputs.sh'
       - 'scripts/required-packages.txt'
       - '.github/workflows/build.yml'
     tags: ['v*']
@@ -42,6 +44,14 @@ jobs:
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
+
+      # 拦一类「本地能编、云端必失败」的故障：编译需要的文件被 .gitignore 吃掉了，
+      # 只在本地树里存在（干净检出就没有）。run #5 就是这样挂的 —— UA3F 的 Go 代码
+      # 用 //go:embed 引用 4 个 eBPF .o，而根 .gitignore 的 `*.o` 把它们挡在仓库外，
+      # 云端 3 秒就报 `pattern tc_bpfel.o: no matching files found`。
+      # 放在这里（而不是编译之后）是为了 1 秒内失败，不浪费一小时。
+      - name: 校验编译输入是否入库（.gitignore 陷阱）
+        run: bash scripts/check-vendored-inputs.sh
 
       - name: 释放磁盘空间（OpenWrt 编译需要 ~25GB）
         run: |
@@ -101,6 +111,7 @@ jobs:
 
       - name: 应用 .config
         run: |
+          set -o pipefail
           make defconfig 2>&1 | tee defconfig.log
           echo "=== 目标机型 ==="
           grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|PROFILE)=' .config
@@ -114,14 +125,30 @@ jobs:
       - name: 预下载源码
         run: make -j$(nproc) download
 
+      # ⚠️ 必须 set -o pipefail：`make | tee log` 的退出码默认是 **tee 的 0**，
+      #    run #5 就是这样把 `make world` 的失败吞掉的 —— 编译早已挂了，流水线却继续
+      #    往下跑精简 pass，最后上传了一份 11MB 的「正式固件」（其实是精简配置编出来的）。
+      #    失败时再补一次 `-j1 V=s`：其余包都已编好，增量走一遍很快，能拿到真正的报错
+      #    （并行构建默认不打印子包的错误详情，只留一句 "ERROR: package/xxx failed to build."）。
       - name: 编译
-        run: make -j$(nproc) 2>&1 | tee build.log
+        run: |
+          set -o pipefail
+          if make -j$(nproc) 2>&1 | tee build.log; then
+            echo "编译完成 ✅"
+            exit 0
+          fi
+          echo "::error::编译失败 —— 用 -j1 V=s 重跑以取得真实报错（增量，不会重做已完成的包）"
+          echo "===================== -j1 V=s 输出（尾部 120 行）====================="
+          make -j1 V=s 2>&1 | tail -120 | tee -a build.log || true
+          exit 1
 
       # 默认构建的第二步：原版 recovery 是 29MB（解包 ~95MB），在 256MB 内存的
       # JCG Q30 Pro 上必然 OOM。这里用 44 项保留清单再跑一遍镜像生成，
       # 把 9.0MB 精简版装回同名文件，并重建 sha256sums。
       - name: 精简 recovery 镜像（默认构建的一部分）
-        run: bash scripts/build-recovery-slim.sh --slim-only 2>&1 | tee -a build.log
+        run: |
+          set -o pipefail
+          bash scripts/build-recovery-slim.sh --slim-only 2>&1 | tee -a build.log
 
       - name: 校验产物（精简 recovery + 关键包）
         run: |
