@@ -217,7 +217,7 @@ bash scripts/build-recovery-slim.sh               # 完整重来：正式构建 
 ## 九、还能做的后续（按需）
 
 1. **TTL / IPID 等 L3 对抗**：UA3F 自带（服务 → UA3F 里勾 TTL/IPID/TCP 时间戳），
-   内核层兜底的 nft 规则脚本在 [Login-edu](https://github.com/2476818641/Login-edu) 的 `openwrt/` 里
+   内核层兜底的 nft 规则脚本在 [Login-edu](https://github.com/2476818641/Login-edu) 仓库的 `campus-net-setup.sh` 里
 2. 继续调 `.config` 里那 378 个包，或加你自己的插件
 
 ---

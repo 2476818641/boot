@@ -269,7 +269,7 @@ bf9724f7eb8c0ddddf1f8fc9d6c104d892c09621125ada137ca6b7447543cc7d  ...-preloader.
 
 | 仓库 | 内容 |
 |---|---|
-| [2476818641/Login-edu](https://github.com/2476818641/Login-edu) | 校园网登录/认证工具集。目前含 `openwrt/` 两个脚本：主脚本 `campus-net-setup.sh`（配置 MAC 克隆 / TTL / MTU / UA + PPPoE 拨号，不做认证）、认证脚本 `campus-portal-auth.sh`（按抓包生成，`--install-hook` 装开机自动认证）；另有抓包清单与使用文档 |
+| [2476818641/Login-edu](https://github.com/2476818641/Login-edu) | 校园网登录/认证工具集（3 脚本 + 3 文档）：入口脚本 `campus-net-setup.sh`（先伪装 MAC/TTL/MTU/UA，再自动做网页认证，`--quick 账号 密码` 一条命令）、认证脚本 `campus-portal-auth.sh`、抓包解析 `burp-xml-summary.py`；文档：`README.md` 介绍流程、`PACKET-CAPTURE.md` 抓包流程、`AI-PROMPT.md` AI 提示词 |
 
 ---
 
