@@ -63,7 +63,7 @@ bash scripts/build-recovery-slim.sh --help         # 用法
 | 解包占用 | ≤ 35MB | ✅ 20.5MB |
 | 启动后可用内存 | ≥ 120MB（`free` 实测） | ⏳ 待真机验证 |
 | 必须能做的事 | ① 串口控制台 ② LAN 起网（192.168.1.1）③ **网页/SSH 刷固件** ④ 写 `fit` 卷 ⑤ 写 `fip` 分区 | ✅ 组件齐全（见 §3 预检） |
-| 不需要的东西 | WiFi 驱动、代理/分流插件、多拨、主题美化、UA3F 本身 | ✅ 已剔除 |
+| 不需要的东西 | WiFi 驱动、代理/分流插件、多拨、主题美化、UA-Mask 本身 | ✅ 已剔除 |
 
 **验收方式**：通过 TFTP 启动它 → `free -m` 看内存 → 用 LuCI 上传正式固件刷一遍 → 重启进正式系统。
 
@@ -97,7 +97,7 @@ sha256  33bcb1f709fcc27599bb69b49a802288a61750973117f7e28ef0b87572ed3553  recove
 | 关键刷机工具 | ✅ `mtd` `ubi-utils` `nand-utils` `fitblk` `kmod-mtd-rw` `uboot-envtools` `fstools` |
 | 引导产物包 | ✅ `trusted-firmware-a-mt7981-spim-nand-ddr3` / `-ram-ddr3` / `-ram-ddr4`、`u-boot-mt7981_jcg_q30-pro` |
 | 网页刷机组件 | ✅ `uhttpd` `rpcd` `luci-base` `luci-mod-system` + 主题 + 中文包 |
-| 大户是否关闭 | ✅ `kmod-mt_wifi` `wpad-openssl` `ua3f` `passwall` `smartdns` `mwan3` `turboacc` `ttyd` `argon` `upnp` `hnat-detect` `dnsmasq-full` 全部关闭 |
+| 大户是否关闭 | ✅ `kmod-mt_wifi` `wpad-openssl` `uamask` `passwall` `smartdns` `mwan3` `turboacc` `ttyd` `argon` `upnp` `hnat-detect` `dnsmasq-full` 全部关闭 |
 
 ### 首次编译失败与修复（记录）
 
@@ -162,7 +162,7 @@ sha256  33bcb1f709fcc27599bb69b49a802288a61750973117f7e28ef0b87572ed3553  recove
 
 **移除（体积/内存大户）**
 
-`kmod-mt_wifi`（MTK 私有 WiFi 驱动，最大头）、`wpad-openssl`、`ua3f`、
+`kmod-mt_wifi`（MTK 私有 WiFi 驱动，最大头）、`wpad-openssl`、`uamask`、
 `luci-app-passwall`、`luci-app-smartdns` + `smartdns`、`mwan3` + `luci-app-mwan3`、
 `luci-app-turboacc-mtk`、`luci-app-upnp` + `miniupnpd-nftables`、`luci-app-ttyd` + `ttyd`、
 `luci-theme-argon` + `luci-app-argon-config`、`luci-app-watchcat`、`dnsmasq-full`→`dnsmasq`、

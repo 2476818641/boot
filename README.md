@@ -1,8 +1,8 @@
 # ImmortalWrt MT798x · JCG Q30 Pro / Q30 · 硬刷方案
 
 面向 **MediaTek MT7981** 平台的自编译 ImmortalWrt 分支，主力机型 **JCG Q30 Pro / Q30**
-（同一块板，兼容 CMCC MR3000D-CIq），集成**校园网 UA3F 防检测**所需组件
-（UA 改写 + L3 重写：TTL / IPID / TCP 时间戳 / TCP 初始窗口 + Desync）。
+（同一块板，兼容 CMCC MR3000D-CIq），集成**校园网 UA-Mask 防检测**所需组件
+（UA 改写 + 非 HTTP 流量自动卸载到内核转发；TTL 伪装由内核 nft 规则负责）。
 
 > ## ⚠️ 本项目为「硬刷方案」
 >
@@ -28,8 +28,8 @@
 | 目标 / 机型 | `mediatek` / `filogic` / **`jcg_q30-pro`** |
 | 兼容机型 | `jcg,q30-pro`、`jcg,q30`、CMCC `MR3000D-CIq`（同一镜像）|
 | 包管理器 | **apk**（OpenWrt 25.x 起由 opkg 切换）|
-| 选中包数 | **380** |
-| 关键组件 | **`UA3F 3.6.0`**（高级 HTTP(S) 重写代理：UA 改写 + L3 重写 TTL/IPID/TCP 时间戳/初始窗口 + Desync，LuCI 在「服务 → UA3F」）；mtwifi 私有驱动；HNAT 硬件加速；mwan3 / passwall / smartdns / turboacc-mtk |
+| 选中包数 | **378** |
+| 关键组件 | **`UA-Mask 0.4.3`**（高性能 UA 改写透明代理：关键词/正则匹配 + UA 白名单 + 非 HTTP 目标自动卸载到内核转发，LuCI 在「服务 → UA MASK」）；mtwifi 私有驱动；HNAT 硬件加速；mwan3 / passwall / smartdns / turboacc-mtk |
 | flash 布局 | UBI 卷：`fit`（正式固件）/ `rootfs_data`（overlay）/ `ubootenv`、`ubootenv2` |
 
 ### 上游切点
@@ -136,7 +136,7 @@ run boot_production
 ```
 
 启动成功标志：**双蓝灯** + 浏览器 `192.168.1.1` 可访问。
-进系统后：`passwd` 设密码 → **服务 → UA3F → 启用**。
+进系统后：`passwd` 设密码 → **服务 → UA MASK → 启用**。
 
 > **只换 `fip`，通常不写 `bl2`**：BL2 一般完好，少写一次少一层风险。
 > 写 `bl2` 前请确认 DDR 类型（本机为 DDR3）。
@@ -150,8 +150,8 @@ run boot_production
 ### 用法
 
 1. **Fork** 本仓库（或在本仓库直接改）
-2. 在网页上编辑 **`.config`**（例如换机型、加减包）。注：UA 串不用改 .config —— UA3F 是运行时在
-   「服务 → UA3F」里配的
+2. 在网页上编辑 **`.config`**（例如换机型、加减包）。注：UA 串不用改 .config —— 它是运行时在
+   「服务 → UA MASK」里配的
 3. 提交后 **自动开始编译**（改动 `.config` / `feeds.conf` 会触发）；也可以去
    **Actions → Build ImmortalWrt (JCG Q30 Pro / Q30) → Run workflow** 手动触发
 4. 约 **3~5 小时**后（含精简 recovery 的第二遍编译），在该次运行的 **Artifacts** 里下载，
@@ -176,7 +176,7 @@ run boot_production
   工作流还会校验体积（>12MB 直接判失败）
 - **防静默丢包**：工作流在 `feeds update/install` 前后备份并还原 `.config`（否则被 `refresh_config`
   里的 defconfig 吃掉），再用 `scripts/check-package-selection.sh` 在 `make defconfig` 之后和产物出来后
-  各查一次（对照 `scripts/required-packages.txt`），缺 `ua3f` 等关键包**直接让构建失败**，
+  各查一次（对照 `scripts/required-packages.txt`），缺 `uamask` 等关键包**直接让构建失败**，
   而不是发一个没有防检测功能的固件
 - **防「本地能编、云端编不过」**：`scripts/check-vendored-inputs.sh` 在检出后立刻检查
   **编译需要的文件是否真的进了 git 仓库**（被 `.gitignore` 忽略的文件本地存在、云端没有），
@@ -193,10 +193,11 @@ run boot_production
 > **直接失败**（除非显式 `FORCE_SLIM_OK=1`）。
 >
 > **2. 被 `.gitignore` 忽略的编译输入 = 只有云端会失败。**
-> UA3F 的 Go 代码用 `//go:embed tc_bpfeb.o` 把 4 个 eBPF 目标文件编进二进制，而仓库根 `.gitignore`
-> 的 `*.o` 规则把它们挡在仓库外：本地树里文件在（能编过），干净检出里没有 →
+> 当年 vendored 的 UA3F（Go）用 `//go:embed tc_bpfeb.o` 把 4 个 eBPF 目标文件编进二进制，而仓库根
+> `.gitignore` 的 `*.o` 规则把它们挡在仓库外：本地树里文件在（能编过），干净检出里没有 →
 > 云端 3 秒报 `pattern tc_bpfel.o: no matching files found`。
-> 现在这 4 个 `.o` 用 `git add -f` 强制入库，并由 `scripts/check-vendored-inputs.sh` 每次云端构建前校验。
+> 现在 `scripts/check-vendored-inputs.sh` 每次云端构建前都会校验「编译输入是否真的进了仓库」
+> （当前守护 UA-Mask 的源码/init/LuCI 文件，并反向禁止上游误提交的 6.5MB x86-64 预编译产物混进来）。
 
 > ⚠️ **重要：`scripts/feeds update -a` 会静默改写 `.config`（云端构建因此丢过 ua2f，当时的 UA 方案）。**
 > 这个命令结尾会调用 `refresh_config()`，也就是偷偷跑一次 `make defconfig`；而全新检出里
@@ -207,7 +208,7 @@ run boot_production
 >
 > 现在工作流已在 feeds 步骤前后备份/还原 `.config`，并用 `scripts/check-package-selection.sh`
 > 把"丢包"变成硬失败（defconfig 之后 + 产物 manifest 之后各查一次）。
-> 自己下固件后也可以核对：`grep '^ua3f ' *.manifest`。
+> 自己下固件后也可以核对：`grep '^uamask ' *.manifest`。
 >
 > 提示：本仓库只存源码，CI 需要完整跑一次工具链 + 378 个包，首次较慢属正常。
 
@@ -220,7 +221,7 @@ run boot_production
 
 ```bash
 export FORCE_UNSAFE_CONFIGURE=1          # root 身份编译必需，否则 tools/tar 会失败
-export GOPROXY=https://goproxy.cn,direct # UA3F 是 Go 项目：proxy.golang.org 国内不通
+export GOPROXY=https://goproxy.cn,direct # UA-Mask 是 Go 项目：proxy.golang.org 国内不通
 bash scripts/build-recovery-slim.sh      # 正式构建 → 精简 recovery → 汇总到 recovery-slim-out/
 # 只想重做精简 recovery（正式产物已在）：bash scripts/build-recovery-slim.sh --slim-only
 ```
@@ -302,7 +303,8 @@ OpenWrt 默认让 recovery 与正式固件共用同一套包（本仓库 380 个
 - 本仓库的 rebase 依托：[chasey-dev/immortalwrt-mt798x-rebase](https://github.com/chasey-dev/immortalwrt-mt798x-rebase)
 - 外部设备 HNAT 支持移植自 [Padavanonly's repo](https://github.com/padavanonly/immortalwrt-mt798x-6.6)
 - BROM 恢复工具：[981213/mtk_uartboot](https://github.com/981213/mtk_uartboot)
-- UA3F（当前使用）：[SunBK201/UA3F](https://github.com/SunBK201/UA3F) —— 前身是 [Zxilly/UA2F](https://github.com/Zxilly/UA2F)，本方案已从 UA2F 换成 UA3F（UA2F 只做 UA 改写，UA3F 多了 L3 重写与 Desync）
+- UA-Mask（当前使用）：[Zesuy/UA-Mask](https://github.com/Zesuy/UA-Mask) 0.4.3，GPL-3.0-only，vendored 在 `package/UA-Mask/`
+- 历史：本方案的 UA 改写经历过 [Zxilly/UA2F](https://github.com/Zxilly/UA2F)（只改 UA）→ [SunBK201/UA3F](https://github.com/SunBK201/UA3F)（多出 L3 重写/Desync，但会把**除 22 外的全部 TCP** 劫持进用户态代理，实测打死游戏加速器与 QUIC 流量，停服务时还会因规则残留导致断网）→ 现在的 UA-Mask（可配置绕过端口 + 非 HTTP 目标自动卸载 + 停止时清理防火墙）。详见 `package/UA-Mask/LOCAL-NOTES.md`
 
 ### 外部设备 HNAT 说明（沿用上游）
 

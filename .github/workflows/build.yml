@@ -20,7 +20,7 @@ on:
     paths:
       - '.config'
       - 'feeds.conf'
-      - 'package/UA3F/**'
+      - 'package/UA-Mask/**'
       - 'scripts/build-recovery-slim.sh'
       - 'scripts/recovery-slim-packages.txt'
       - 'scripts/check-package-selection.sh'
@@ -46,7 +46,7 @@ jobs:
         uses: actions/checkout@v4
 
       # 拦一类「本地能编、云端必失败」的故障：编译需要的文件被 .gitignore 吃掉了，
-      # 只在本地树里存在（干净检出就没有）。run #5 就是这样挂的 —— UA3F 的 Go 代码
+      # 只在本地树里存在（干净检出就没有）。run #5 就是这样挂的 —— 当年 UA3F 的 Go 代码
       # 用 //go:embed 引用 4 个 eBPF .o，而根 .gitignore 的 `*.o` 把它们挡在仓库外，
       # 云端 3 秒就报 `pattern tc_bpfel.o: no matching files found`。
       # 放在这里（而不是编译之后）是为了 1 秒内失败，不浪费一小时。
@@ -117,7 +117,7 @@ jobs:
           grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|PROFILE)=' .config
 
       # 把"静默丢包"变成硬失败：拿仓库里提交的那份 .config 和 defconfig 之后的结果对比，
-      # 缺任何一个关键包（ua3f 等）就直接失败，并打印被丢掉的包清单。
+      # 缺任何一个关键包（uamask 等）就直接失败，并打印被丢掉的包清单。
       - name: 校验包选择（防止 defconfig 静默丢包）
         run: |
           bash scripts/check-package-selection.sh --config .config.committed .config

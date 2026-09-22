@@ -13,8 +13,9 @@
 # 每行一个包名；# 开头是注释。改 .config 时记得同步这里的关键项。
 
 # —— 校园网防检测（本项目的核心，绝对不能丢）——
-# UA3F 自带 LuCI 页面（服务 → UA3F），所以不需要单独的 luci-app-* 包
-ua3f
+# UA-Mask 自带 LuCI 页面（服务 → UA-Mask），所以不需要单独的 luci-app-* 包
+# （2026-09 换成 UA-Mask，之前是 UA3F/UA2F，原因见 package/UA-Mask/LOCAL-NOTES.md）
+uamask
 
 # —— 无线与硬件加速（MTK 私有驱动 + HNAT）——
 kmod-mt_wifi

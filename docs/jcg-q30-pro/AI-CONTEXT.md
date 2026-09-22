@@ -176,7 +176,7 @@ run boot_production
 ```
 
 Then in Linux: `df -h | grep overlay` (expect `/dev/ubi0_1` → `/overlay`, ~62 MiB), `hostname` = ImmortalWrt,
-`passwd`, enable UA3F in LuCI (Services → UA3F), then `reboot` and confirm autoboot works with keyboards untouched.
+`passwd`, enable UA-Mask in LuCI (Services → UA MASK), then `reboot` and confirm autoboot works with keyboards untouched.
 
 ### Hardening (recommended once a unit is up)
 
@@ -253,55 +253,75 @@ Useful in-system checks: `df -h`, `mount | grep overlay`, `ubinfo -a`, `ip -4 ad
 
 ---
 
-## 8. UA3F (the actual purpose of the build)
+## 8. UA-Mask (the actual purpose of the build)
 
-Replaced UA2F with **UA3F** (2026-09-19). UA2F only rewrites the User-Agent via NFQUEUE; UA3F is a
-superset that also does L3 rewriting (TTL / IPID / TCP timestamp / TCP initial window / QUIC block),
-Desync (TCP segment reordering, obfuscation injection), optional HTTPS MitM, and eBPF offload.
+Replaced UA3F with **UA-Mask** (2026-09-22). Both are REDIRECT transparent proxies for rewriting the
+HTTP `User-Agent`, but UA3F hijacks **all TCP except port 22**
+(`tcp dport != {22} redirect to :1080`) into a user-space Go process, which broke real clients; UA-Mask
+defaults to bypassing 22 **and 443**, lets you extend that bypass list, and — the reason for the switch —
+can **offload non-HTTP destinations into an nftables set** so that traffic (game accelerators, Steam,
+P2P) stops entering user space entirely. See `package/UA-Mask/LOCAL-NOTES.md` for the full rationale.
 
 | item | value |
 |---|---|
-| upstream | [SunBK201/UA3F](https://github.com/SunBK201/UA3F) 3.6.0, GPL-3.0-only, Go |
-| in this tree | vendored at `package/UA3F/` (upstream layout: Go sources at the root, OpenWrt package in `openwrt/`) |
-| local patch | `openwrt/Makefile`: `PKG_BUILD_DEPENDS:=golang/host luci-base/host` (upstream omits the `po2lmo` host dependency) — see `package/UA3F/LOCAL-NOTES.md` |
-| package symbol | `CONFIG_PACKAGE_ua3f` (lowercase!) |
-| deps (auto) | `iptables` (→`iptables-nft`), `iptables-mod-{tproxy,extra,ipopt,nfqueue,conntrack-extra}`, `ipset`, `luci-compat`, `kmod-nf-conntrack-netlink` |
-| LuCI | ships its own page inside the package: **Services → UA3F** (Lua/CBI + `luci-compat`) |
-| replaced | `ua2f`, `luci-app-ua2f`, `luci-i18n-ua2f-zh-cn` are no longer selected |
+| upstream | [Zesuy/UA-Mask](https://github.com/Zesuy/UA-Mask) 0.4.3, GPL-3.0-only, Go |
+| upstream commit | `83846d3780b1e30f87816310ae75d95798a5bd4d` (2026-08-02) |
+| in this tree | vendored at `package/UA-Mask/` (`Makefile` at the package root, Go sources in `core/`, OpenWrt assets in `openwrt/`) |
+| package symbol | `CONFIG_PACKAGE_uamask` (**lowercase**, unlike upstream's `UAmask`) |
+| fixed names | the binary must be `/usr/bin/UAmask` and the UCI file `/etc/config/UAmask` — the init script (`NAME=UAmask`, `PROG=/usr/bin/$NAME`) and the LuCI CBI page hardcode them. Only the *package* name is lowercased. |
+| deps | `$(GO_ARCH_DEPENDS) +libubox +luci-compat` (`libubox` → `jshn.sh`; `luci-compat` → the Lua/CBI page) |
+| conflicts | `ua3f ua3f-tproxy ua3f-tproxy-ipt` → Kconfig `depends on m || (PACKAGE_ua3f != y)` |
+| LuCI | ships its own page inside the package: **Services → UA MASK** (Lua/CBI) |
+| build target | `make package/UA-Mask/compile` — **the directory path, not the package name** |
 
-UCI schema (`/etc/config/ua3f`, shipped default `enabled=0`):
+UCI schema (`/etc/config/UAmask`, shipped `enabled=0`; the init script renders these into
+`/var/run/UAmask/config.json` via `jshn` and validates with `UAmask -check-config`):
 
 ```text
-ua3f.enabled.enabled        0        # must be enabled
-ua3f.main.server_mode       TPROXY   # HTTP | SOCKS5 | TPROXY | REDIRECT | NFQUEUE  (start with NFQUEUE)
-ua3f.main.port / bind       1080 / 0.0.0.0
-ua3f.main.ua                FFF      # replacement UA string
-ua3f.main.ua_regex, partial_replace, rewrite_mode (GLOBAL), log_level (WARN)
-ua3f.main.header_rewrite / body_rewrite / url_redirect   # JSON rule lists
-ua3f.main.l3_rewrite_ttl (0) l3_rewrite_ttl_value (64) l3_rewrite_ipid (0)
-ua3f.main.l3_rewrite_tcpts (0) l3_rewrite_tcpwin (0) l3_rewrite_block_quic (0) l3_rewrite_bpf_offload (0)
-ua3f.main.desync_reorder (0) desync_reorder_bytes (1500) desync_reorder_packets (8) desync_inject (0) desync_inject_ttl (3)
-ua3f.main.mitm_enabled (0) mitm_ca_p12_base64 / mitm_ca_passphrase / mitm_hostname / mitm_skip_verify
+UAmask.enabled.enabled        0          # must be enabled
+UAmask.main.port              12032
+UAmask.main.ua                FFF        # replacement UA string
+UAmask.main.match_mode        keywords   # keywords | regex
+UAmask.main.keywords          iPhone,iPad,Android,Macintosh,Windows
+UAmask.main.ua_regex          (iPhone|iPad|Android|Macintosh|Windows|Linux|Apple|Mac OS X|Mobile)
+UAmask.main.replace_method    full       # full | partial
+UAmask.main.whitelist         ''         # UA keywords never rewritten
+UAmask.main.iface             br-lan
+UAmask.main.bypass_ports      '22 443'   # != semantics: listed ports are NOT proxied
+UAmask.main.bypass_ips        private ranges
+UAmask.main.proxy_host        0          # also proxy the router's own output
+UAmask.main.enable_firewall_set  1       # ← we changed the upstream default (was 0)
+UAmask.main.Firewall_ua_bypass   1       # ← we changed the upstream default (was 0); non-HTTP offload
+UAmask.main.Firewall_ua_whitelist ''     # (capital F — LuCI quirk)
+UAmask.main.Firewall_drop_on_match 0
+UAmask.main.operating_profile Medium  / cache_size 2000 / buffer_size 8192 / gogc_value 100
+UAmask.main.log_level info / log_file /tmp/UAmask/UAmask.log
 ```
 
-Shipped rule list rewrites most UAs to `FFF` but passes through MicroMessenger / Bilibili Freedoooooom /
-Steam clients, and rewrites the UA on `ua-check.stagoh.com` to `UA3F` (use that site to verify).
+The two `1`s are local deviations: with them off, the whole "traffic offload" feature is inert and the
+accelerator problem comes straight back.
 
-Runtime checks: `/etc/init.d/ua3f status`, `pgrep -a ua3f`, `nft list ruleset | grep -i ua3f`,
-`logread -e ua3f`. The daemon programs its own nftables rules (no `handle_fw` UCI switch like UA2F had).
+Runtime checks: `/etc/init.d/UAmask status`, `pgrep -a UAmask`,
+`nft list table inet fw4 | grep -i uamask`, `nft list set inet fw4 UAmask_bypass_set`
+(learned `ip . port` pairs that no longer enter the proxy), `logread -e UAmask`.
 
 Notes / gotchas:
-- L3 (TTL/IPID/TCP) rewriting only covers flows UA3F handles. The kernel-side nft rule from
-  [Login-edu](https://github.com/2476818641/Login-edu) (`/etc/nftables.d/10-ttl-fix.nft`, rewrites TTL on
-  every non-LAN egress) is independent — keep it as a full-coverage fallback.
-- Never run UA2F and UA3F at the same time.
-- HNAT / flow offload can bypass user-space rewriting — same caveat as with UA2F.
-- Go toolchain: needs `golang/host` (feed `packages/lang/golang`, default Go 1.26); the source tarball is
-  already in `dl/` (`go1.26.3.src.tar.gz`), so a full build needs no extra download.
-- eBPF offload needs kernel >= 5.15 (this target: 6.12 → available).
-
----
-
+- The firewall rules live **inside `table inet fw4`** as an fw4 include (`uci firewall.UAmask.path=/tmp/UAmask_rules.nft`),
+  not in a private table, and `stop_service()` deletes the chains/set and runs `fw4 reload`. UA3F had no
+  `stop_service`, so stopping it left `tcp dport != {22} redirect to :1080` behind → **all TCP blackholed
+  while ICMP still worked** ("停掉 UA3F 电脑无网"). Never reintroduce that pattern.
+- Offload mechanism: `nft add set inet fw4 UAmask_bypass_set { type ipv4_addr . inet_service ; timeout 10m ;}`
+  plus `ip daddr . tcp dport @UAmask_bypass_set return` placed **before** the redirect in
+  `UAmask_prerouting_before` / `UAmask_output_after`.
+- **No L3 rewriting at all**: no TTL/IPID/TCP-timestamp/TCP-window/QUIC-block/Desync/MitM. That is a
+  feature, not a gap: `block_quic` drops all UDP/443 and the Desync options shuffle TCP, both of which
+  kill accelerators and QUIC. **TTL spoofing is the kernel nft rule's job**
+  ([Login-edu](https://github.com/2476818641/Login-edu) → `/etc/nftables.d/10-ttl-fix.nft`).
+- HNAT / flow offload can bypass user-space rewriting — same caveat as with UA2F/UA3F.
+- Go toolchain: `golang/host` (feed `packages/lang/golang`, Go 1.26) already built; modules must exist in
+  `dl/go-mod-cache` (see §10e).
+- Upstream commits a 6.5 MB **x86-64 prebuilt binary at `core/UAmask`** — deliberately not vendored, and
+  `scripts/check-vendored-inputs.sh` now fails if it reappears.
 
 ## 9. BUILD ENVIRONMENT (on the VPS, `/root/immortalwrt-mt798x-rebase`)
 
@@ -310,7 +330,8 @@ repo: ImmortalWrt rebase (MTK mt798x), branch 25.12, remote chasey-dev via ghpro
 tree_state: HEAD == origin/25.12; only local edit = scripts/download.pl (ghproxy rewrite, now https?)
 build_cmd: export FORCE_UNSAFE_CONFIGURE=1 && export GOPROXY=https://goproxy.cn,direct && make -j$(nproc) V=s
            # FORCE_UNSAFE_CONFIGURE: root build, GNU tar configure refuses otherwise
-           # GOPROXY: UA3F is a Go package; proxy.golang.org is unreachable from this host, goproxy.cn works
+           # GOPROXY: UA-Mask is a Go package; proxy.golang.org is unreachable from this host, goproxy.cn works
+           # but for UA-Mask the modules are already populated into dl/go-mod-cache, so the build is offline (see §10e)
            # Go toolchain itself is already in dl/ (go1.26.3.src.tar.gz, hash matches the feed) → no extra download
 config: .config = mediatek/filogic/jcg_q30-pro + 378 packages; target device jcg_q30-pro only
 feeds: feeds.conf (untracked, gitignored) points all 5 feeds at https://cf.liuass.eu.org/ghproxy/https://github.com/...
@@ -321,13 +342,13 @@ cache: dl/ (~1.7 GB) warm; full build ~1–3 h, ~19 GB disk
 Kernel-state trap (hit 2026-09-20): kmod `KCONFIG` symbols are merged into the kernel config **only
 during the kernel build** (`include/kernel-defaults.mk:120-121` -> `package-metadata.pl kconfig` ->
 `.config.override`), and `$(STAMP_CONFIGURED)` is refreshed solely when `target/linux/compile` runs.
-Therefore, right after switching `.config` (production <-> slim recovery, or ua2f -> ua3f):
+Therefore, right after switching `.config` (production <-> slim recovery, or ua3f -> uamask):
 
 - `make -j$(nproc)` (world) OK: reconfigures the kernel and rebuilds the modules
 - `make package/<something>/compile` FAILS: it does not enter `target/linux/compile`, so kmod packaging
   runs against a stale kernel config and dies with e.g.
   `ERROR: module '.../arch/arm64/crypto/sha512-arm64.ko' is missing.` -> `package/kernel/linux failed to build`
-  (exactly what happened when validating UA3F: the previous slim pass had left
+  (exactly what happened when validating UA3F in 2026-09; same trap applies to any kmod switch: the previous slim pass had left
   `# CONFIG_CRYPTO_SHA512_ARM64 is not set`, while `CONFIG_PACKAGE_kmod-crypto-sha512=y` was back on)
 
 Safe fast path after a config switch: run `make target/linux/compile -j$(nproc)` first (refreshes the
@@ -461,7 +482,7 @@ Rules for anything that touches the build:
 
 ---
 
-## 10d. ⚠️ CI run #5 FAILURE (2026-09-20): a `.gitignore`d build input exists only on your machine
+## 10d. ⚠️ CI run #5 FAILURE (2026-09-20, UA3F era — kept as a lesson): a `.gitignore`d build input exists only on your machine
 
 **Symptom (Actions run #5, `8326fd0a`):** the `编译` step reported **success**, the job then died in
 `校验产物` with a manifest of **117 packages** (the slim recovery count) instead of ~350, and
@@ -478,7 +499,7 @@ Rules for anything that touches the build:
    make -r world: build failed. Please re-run make with -j1 V=s or V=sc for a higher verbosity level
    ```
 
-   UA3F embeds eBPF objects with `//go:embed tc_bpfeb.o` (upstream commits them; they are **build inputs**,
+   (UA3F-era) UA3F embeds eBPF objects with `//go:embed tc_bpfeb.o` (upstream commits them; they are **build inputs**,
    not leftovers). The repo root `.gitignore` line 1 is `*.o`, so a plain `git add` silently skipped them:
    `git ls-tree -r HEAD package/UA3F | grep -c '\.o$'` → **0**, while the local tree had 285 files vs 281 tracked.
    Proof of mechanism (reproduced locally with the vendored source, no OpenWrt build needed):
@@ -504,6 +525,7 @@ Rules for anything that touches the build:
 **Fixes applied:**
 
 ```text
+# (UA3F-era; UA3F is gone, the guard script now covers package/UA-Mask)
 git add -f package/UA3F/internal/bpf/tc/tc_bpfeb.o tc_bpfel.o \
            package/UA3F/internal/bpf/sockmap/sockmap_bpfeb.o sockmap_bpfel.o
 scripts/check-vendored-inputs.sh          # NEW: verifies each build input exists AND is tracked by git;
@@ -530,6 +552,67 @@ scripts/build-recovery-slim.sh:
 
 ---
 
+## 10e. UA3F -> UA-Mask switch (2026-09-22): why, and five traps
+
+**Why we left UA3F.** Not a rewrite-quality problem — an interception-scope problem. Conntrack on the
+live router showed the accelerator (奇游) using UDP `43.139.213.13:9993/9995/9997` (which worked: replies
+came back, so the client reached "connected") plus a **TCP tunnel to the same host on a high port** — and
+the TCP half is exactly what UA3F's `tcp dport != {22} redirect to :1080` pulls into its user-space proxy.
+Symptom: connected but node latency never measured / earlier `-08`. Node IPs rotate, so IP allow-listing
+is not a fix; the interception scope itself had to change. A second UA3F defect surfaced during
+diagnosis: it has no `stop_service`, so after `stop` the redirect rule persists and **all TCP is
+blackholed while ping still works** (that is why "停掉 ua3f 电脑无网" while `ping -f -l 1472` was 100% clean).
+UA-Mask fixes both by design (configurable bypass + offload to an nft set + clean teardown).
+
+**Trap 1 — `include/scan.awk` dedupes packages by the *last* path component.**
+`PKGS[$NF]=$0` means two package directories whose basename collides (e.g. `package/UA3F/openwrt` and
+`package/UA-Mask/openwrt` — both `openwrt`) silently overwrite each other in `tmp/.packagedeps`.
+The loser disappears from `tmp/.packageinfo`, `make defconfig` then **deletes its `CONFIG_PACKAGE_x=y`
+line without any error**, and `make package/<name>/compile` says `No rule to make target`.
+Diagnosis: `grep -c '^Package: uamask$' tmp/.packageinfo`. Fix: give the package directory a unique
+name (`package/UA-Mask/Makefile`, not `.../openwrt/Makefile`). Also note a **two-pass effect**: after
+adding a directory, the first `make defconfig` only refreshes the file list; the per-directory DUMP file
+(`tmp/info/.packageinfo-<dir>`) appears on the next run.
+
+**Trap 2 — `make defconfig` deletes `=y` for symbols it cannot see.** If you write
+`CONFIG_PACKAGE_uamask=y` before the package is registered (see trap 1), defconfig rewrites the line to
+`# CONFIG_PACKAGE_uamask is not set` and the next runs happily keep it disabled. Always re-check with
+`grep -n CONFIG_PACKAGE_uamask .config` after registering a new package.
+
+**Trap 3 — Go modules must be pre-populated into `dl/go-mod-cache`.** The build sets
+`GOMODCACHE=$(DL_DIR)/go-mod-cache`, `GOENV=off`, `GOTOOLCHAIN=local` and does **not** set `GOPROXY`, so
+any module missing from that cache makes Go reach for `proxy.golang.org` — which fails on this host with
+`tls: failed to verify certificate: x509: certificate has expired` (the network's TLS-interception cert
+expired 2026-09-19). Populate the shared cache with the *same* layout before building:
+
+```sh
+cd package/UA-Mask/core
+GOMODCACHE=$TOPDIR/dl/go-mod-cache GOCACHE=/tmp/gocache GOENV=off GOTOOLCHAIN=local \
+  GOFLAGS=-modcacherw GOSUMDB=off GOPROXY=http://goproxy.cn,direct go mod download
+# UA-Mask needs: logrus v1.9.3, golang.org/x/sys v0.30.0, hashicorp/golang-lru/v2 v2.0.7,
+#                gopkg.in/natefinch/lumberjack.v2 v2.2.1 (dlark/regexp2 v1.11.5 was already there)
+```
+
+Verify offline before touching the buildroot: `GOPROXY=off go build -o /tmp/UAmask ./cmd/UAmask`.
+
+**Trap 4 — package build targets are directory paths, not package names.**
+`make package/UA-Mask/compile` works; `make package/uamask/compile` fails with `No rule to make target`.
+(`tmp/.packagedeps` line: `package-$(CONFIG_PACKAGE_uamask) += UA-Mask`.)
+
+**Trap 5 — the `.ipk` from upstream releases cannot be installed here.** ImmortalWrt 25.12 uses **apk**;
+upstream publishes opkg `.ipk`. Always build from the vendored source in-tree.
+
+**Offline self-tests for the vendored package (no OpenWrt build needed, ~20 s):**
+
+```sh
+sh package/UA-Mask/openwrt/tests/config-generation-test.sh   # 5 assertions: UCI -> config.json
+sh package/UA-Mask/openwrt/tests/procd-contract-test.sh      # start_service contract
+```
+Both pass with the local defaults (they build the Go binary themselves — export `GOMODCACHE`/`GOPROXY=off`
+as in trap 3 if the host has no network).
+
+---
+
 ## 11. VERIFICATION CHECKLIST (per unit)
 
 ```text
@@ -541,7 +624,7 @@ Linux:
   cat /etc/openwrt_release   -> ImmortalWrt 25.12-SNAPSHOT r38026-5e20cf34aa
   hostname / df -h | grep overlay / mount | grep overlay
   lsmod | grep -E 'hnat|mt_wifi'      (HNAT + MTK wifi driver loaded)
-  /etc/init.d/ua2f status ; nft list table inet ua2f
+  /etc/init.d/UAmask status ; nft list table inet fw4 | grep -i uamask ; pgrep -a UAmask
 Reboot test: power-cycle, do not touch keys, expect autoboot into the system in ~20 s.
 ```
 

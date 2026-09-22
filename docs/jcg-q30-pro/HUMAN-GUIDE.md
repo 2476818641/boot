@@ -15,7 +15,7 @@
 | 布局 | `fit` 卷（正式固件，内核据此生成 `/dev/fit0`）+ `rootfs_data`（overlay，60M+） |
 | 系统 | ImmortalWrt 25.12-SNAPSHOT，包管理器是 **apk**（不是 opkg） |
 | 硬件 | MT7981B + DDR3 256MB + Winbond 128MB SPI-NAND + MT7531 交换芯片 |
-| 校园网防封 | `UA3F`（UA 改写 + L3 重写 TTL/IPID/TCP 时间戳/初始窗口 + Desync，**服务 → UA3F**）|
+| 校园网防封 | `UA-Mask`（UA 改写 + 非 HTTP 流量自动卸载到内核转发，**服务 → UA MASK**）；TTL 伪装由内核 nft 规则兜底 |
 
 成功的样子：**两个蓝灯常亮**，浏览器 `192.168.1.1` 能进 LuCI。
 
@@ -110,17 +110,25 @@
 
 ## 四、刷完之后要做的配置
 
-1. 浏览器 `192.168.1.1` → **服务 → UA3F** → 打开 **"启用"**
-   - **服务模式**先用 `NFQUEUE`（就是老 UA2F 那套，开销最低）；确认稳定后想折腾再试 `TPROXY`
-   - `UA` 默认 `FFF`，想更像真人就填一串常见浏览器 UA（默认规则对微信/B站/Steam 客户端是放行不改写的）
-   - 同页可以打开 **L3 重写**：`TTL`（默认关，值 64）、`IPID`、删 `TCP Timestamp`、
-     `TCP 初始窗口`、阻断 QUIC —— 这几项是校园网检测里老 UA2F 完全管不到的部分
-   - **Desync**（分片乱序发射/混淆注入）和 **MitM** 先别开，稳定性优先
+1. 浏览器 `192.168.1.1` → **服务 → UA MASK** → 打开 **"启用"**（默认是关的）
+   - **User-Agent 标识**：填你要伪装成的那一串（默认 `FFF` 太假，建议填常见 Chrome/Windows UA）
+   - **匹配规则**：`关键词`（默认 `iPhone,iPad,Android,Macintosh,Windows`）或 `正则`
+     （默认覆盖手机+PC 全家族）—— 命中就改写成上面那串，**没命中就原样放行**
+   - **网络**页里两个开关**保持打开**（本固件默认已开）：
+     **「启用流量卸载」**`enable_firewall_set=1` + **「绕过非 http 流量」**`Firewall_ua_bypass=1`。
+     确认不是 HTTP 的目标会被写进 nftables 集合，之后这些目标的流量**不再进用户态代理** ——
+     游戏加速器隧道 / Steam 下载 / P2P 就靠这个不被搅坏（节点 IP 会变也没关系，它按 `IP.端口` 自动重新学习）
+   - **User-Agent 白名单**（`whitelist`）：不想被改写的 UA 关键词填这里，例如 `QeeYouAcceler,Valve/Steam`
+   - **绕过目标端口**默认 `22 443`（443 是 TLS，本来就看不到 UA）
+   - ⚠️ 本方案**不再提供** L3 重写（TTL/IPID/删 TCP 时间戳/阻断 QUIC）与 Desync：那是前身 UA3F 的功能，
+     实测会把加速器隧道和 QUIC 流量打死（尤其"阻断 QUIC"会丢光 UDP 443）。**TTL 伪装由内核 nft 规则负责**（见第九节）
 2. SSH 验证：
    ```sh
-   /etc/init.d/ua3f status
-   pgrep -a ua3f                      # 进程在跑
-   nft list ruleset | grep -i ua3f    # 它自己建的队列/转发规则
+   /etc/init.d/UAmask status
+   pgrep -a UAmask                              # 进程在跑
+   nft list table inet fw4 | grep -i uamask     # 它注册到 fw4 的规则 + 卸载集合
+   nft list set inet fw4 UAmask_bypass_set      # 被自动卸载（不再进代理）的目标 IP.端口
+   logread -e UAmask                            # 日志；config.json 生成失败会写在这里
    ```
 3. 安全：LuCI → **系统 → 管理权** → 关掉 WAN 侧的 SSH / Web 访问
 4. 电脑网卡改回自动获取 IP
@@ -181,9 +189,11 @@ bash scripts/build-recovery-slim.sh               # 完整重来：正式构建 
 | 刷完能启动但浏览器打不开 `192.168.1.1` | **网线插在 WAN 口**（U-Boot 阶段任何口都能 TFTP，极具误导） | 插 `lan1`/`lan2`/`lan3` |
 | TFTP 报 `File not found` | Tftpd64 的 `Current Directory` 没指对 | 改目录，或先用 `tftp -i 192.168.1.254 GET <文件名>` 自测 |
 | TFTP 完全没请求 | 网卡 IP 不对 / 防火墙把新网段判成"公用" | 网卡设 `.254`；防火墙专用+公用都放行 |
-| UA3F 开了但 UA 没变 / 网页打不开 | ① 服务没启用（`ua3f.enabled.enabled`）② 服务模式问题（先用 NFQUEUE）③ 默认规则里对微信/B站/Steam 是放行的 | `pgrep -a ua3f` 看进程；LuCI 服务→UA3F 看规则与日志；用 http://ua-check.stagoh.com/ 验证（该站会显示 UA3F）|
+| UA-Mask 开了但 UA 没变 | ① 服务没启用（`UAmask.enabled.enabled`）② UA 没命中匹配规则（关键词/正则都不匹配就原样放行，这是设计行为）③ 目标端口在「绕过目标端口」里 | `pgrep -a UAmask`；LuCI 服务→UA MASK 看**运行状态/运行统计**；用 http://ua-check.stagoh.com/ 验证 |
+| 开了之后**网页打不开** | 极少见：`generate_core_config` 失败或防火墙规则没清干净。UA-Mask 的 `stop_service` 会自动删链删集合并 `fw4 reload`，所以停服务不该断网 | `logread -e UAmask`；`uci set UAmask.enabled.enabled='0'; uci commit UAmask; /etc/init.d/UAmask stop` 后应能正常上网 |
+| **加速器能连上但延迟测不出来 / 报 `-08`** | 隧道流量被代理转坏了。确认「启用流量卸载」+「绕过非 http 流量」都开着；也可把加速器节点**端口**加进「绕过目标端口」 | `nft list set inet fw4 UAmask_bypass_set` 看有没有学到那些 `IP.端口`；LuCI 里改完记得**保存并应用** |
 | 以 root 编译报 `tools/tar failed to build` | GNU tar 的 configure 拒绝 root 身份 | `export FORCE_UNSAFE_CONFIGURE=1` 再编译 |
-| **云端编译（Actions）出来的固件里没有 UA3F（或当年的 ua2f）** | **`./scripts/feeds update -a` 结尾会偷偷跑一次 `make defconfig` 改写 `.config`**，而那时 `package/feeds/` 还没建好（全新检出里它被 .gitignore 忽略）→ 所有"来自 feed 的已选包"被静默删掉（380 → 292），后面 install/defconfig 都救不回来。第一次云端构建就是这样发出了一个没有 UA（当时的 ua2f）的固件，工作流还是绿灯 | 仓库已修：工作流在 feeds 步骤前备份 `.config`、之后还原，并用 `scripts/check-package-selection.sh` 两道校验把丢包变成失败。**自己下到固件后先 `grep '^ua3f ' *.manifest`** 确认；本地编译则注意"先装 feeds，再改 .config"" |
+| **云端编译（Actions）出来的固件里没有 UA-Mask（或当年的 ua2f/ua3f）** | **`./scripts/feeds update -a` 结尾会偷偷跑一次 `make defconfig` 改写 `.config`**，而那时 `package/feeds/` 还没建好（全新检出里它被 .gitignore 忽略）→ 所有"来自 feed 的已选包"被静默删掉（380 → 292），后面 install/defconfig 都救不回来。第一次云端构建就是这样发出了一个没有 UA（当时的 ua2f）的固件，工作流还是绿灯 | 仓库已修：工作流在 feeds 步骤前备份 `.config`、之后还原，并用 `scripts/check-package-selection.sh` 两道校验把丢包变成失败。**自己下到固件后先 `grep '^uamask ' *.manifest`** 确认；本地编译则注意"先装 feeds，再改 .config"" |
 
 ---
 
@@ -193,7 +203,7 @@ bash scripts/build-recovery-slim.sh               # 完整重来：正式构建 
 |---|---|
 | **FIT / `.itb`** | 一种把内核、设备树、根文件系统打包在一起的镜像格式 |
 | **`fit` 卷** | UBI 里存放 FIT 的卷。**内核按这个名字生成 `/dev/fit0`**，名字错了系统就起不来 |
-| **`rootfs_data`** | overlay 卷，你的配置（WiFi、UA3F 开关）都存在这里；没有它系统就是只读的 |
+| **`rootfs_data`** | overlay 卷，你的配置（WiFi、UA-Mask 开关）都存在这里；没有它系统就是只读的 |
 | **`ubootenv` / `ubootenv2`** | U-Boot 的环境变量仓库（启动参数、菜单设置），**永远不要删** |
 | **pstore / ramoops** | 内核崩溃记录区。有记录时 `bootcmd` 会"以为系统崩了"而改走 recovery 路径 |
 | **BROM** | 芯片出厂固化的最底层引导，mtk_uartboot 就是跟它对话 → 所以能救一切 |
@@ -216,8 +226,10 @@ bash scripts/build-recovery-slim.sh               # 完整重来：正式构建 
 
 ## 九、还能做的后续（按需）
 
-1. **TTL / IPID 等 L3 对抗**：UA3F 自带（服务 → UA3F 里勾 TTL/IPID/TCP 时间戳），
-   内核层兜底的 nft 规则脚本在 [Login-edu](https://github.com/2476818641/Login-edu) 仓库的 `campus-net-setup.sh` 里
+1. **TTL 对抗**：内核 nft 规则兜底（`/etc/nftables.d/10-ttl-fix.nft`），生成脚本在
+   [Login-edu](https://github.com/2476818641/Login-edu) 仓库的 `campus-net-setup.sh` 里。
+   IPID / 删 TCP 时间戳 / 阻断 QUIC / Desync 这类操作**不建议开**：实测会打死加速器与 QUIC 流量
+   （UA3F 时代踩过，已随 UA3F 一起弃用）
 2. 继续调 `.config` 里那 378 个包，或加你自己的插件
 
 ---

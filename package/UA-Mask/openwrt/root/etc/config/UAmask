@@ -1,0 +1,26 @@
+config 'UAmask' 'enabled'
+	option enabled '0'
+
+config 'UAmask' 'main'
+    option port '12032'
+    option ua 'FFF'
+    option log_level 'info'
+    option iface 'br-lan'
+    option bypass_gid '65533'
+    # 只劫持明文 HTTP 才有意义：443 是 TLS，看不到 User-Agent，所以默认就绕过。
+    # 注意这里是「!= 白名单」语义：列进去的端口绕过，其余端口仍会被劫持。
+    # 要彻底避免"隧道类流量被代理"（加速器/Steam/P2P），靠下面两项开关，而不是往这里堆端口。
+    option bypass_ports '22 443'
+    option bypass_ips '172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 169.254.0.0/16'
+    option ua_regex '(iPhone|iPad|Android|Macintosh|Windows|Linux|Apple|Mac OS X|Mobile)'
+    option proxy_host '0'
+    option whitelist ''
+    option log_file '/tmp/UAmask/UAmask.log'
+
+    # ↓ 本仓库改动（上游默认两个都是 0）：这两项是换用 UA-Mask 的主要理由 ——
+    #   1) enable_firewall_set：允许把"确认不是 HTTP"的目标写进 nftables 集合；
+    #   2) Firewall_ua_bypass：非 HTTP 流量被识别若干次后自动卸载到内核转发，
+    #      之后这些目标（游戏加速器隧道、P2P、视频流…）的流量不再进入用户态代理。
+    #   目标按「IP . 端口」记录，所以节点 IP 变了会重新学习，不需要手工维护 IP 白名单。
+    option enable_firewall_set '1'
+    option Firewall_ua_bypass '1'

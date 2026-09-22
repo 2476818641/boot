@@ -4,11 +4,12 @@
 # 校验「编译需要、但很容易被 .gitignore 吃掉」的文件确实进了 git 仓库。
 #
 # 为什么需要这个脚本（2026-09-20 CI run #5 实测）：
-#   package/UA3F 的 Go 代码用 `//go:embed tc_bpfeb.o` 把 eBPF 目标文件编进二进制，
-#   但这 4 个 .o 被仓库根 .gitignore 的 `*.o` 规则忽略了 ——
+#   当时 vendored 的 package/UA3F 用 `//go:embed tc_bpfeb.o` 把 eBPF 目标文件编进二进制，
+#   但那 4 个 .o 被仓库根 .gitignore 的 `*.o` 规则忽略了 ——
 #   本地树里文件在（能编过），仓库里没有（CI 干净检出 3 秒就失败：
 #   `pattern tc_bpfel.o: no matching files found`）。
 #   这类「本地能编、云端编不过」的故障只看报错几乎查不出来，所以在这里一次性挡住。
+#   （UA3F 已被 UA-Mask 取代，但这条教训通用：凡是非标准源码的编译输入都必须入库。）
 #
 # 用法：bash scripts/check-vendored-inputs.sh
 # 退出码：0 全部就位；1 有缺失/未入库
@@ -22,15 +23,18 @@ note() { printf '%s\n' "$*"; }
 # ---------- 必须存在的「非源码编译输入」清单 ----------
 # 每行一个路径（文件或目录）。目录只要仓库里有至少一个文件就算通过。
 REQUIRED="
-package/UA3F/go.mod
-package/UA3F/go.sum
-package/UA3F/main.go
-package/UA3F/cmd
-package/UA3F/internal
-package/UA3F/internal/bpf/tc/tc_bpfeb.o
-package/UA3F/internal/bpf/tc/tc_bpfel.o
-package/UA3F/internal/bpf/sockmap/sockmap_bpfeb.o
-package/UA3F/internal/bpf/sockmap/sockmap_bpfel.o
+package/UA-Mask/VERSION
+package/UA-Mask/LICENSE
+package/UA-Mask/LOCAL-NOTES.md
+package/UA-Mask/core/go.mod
+package/UA-Mask/core/go.sum
+package/UA-Mask/core/cmd/UAmask/main.go
+package/UA-Mask/core/internal
+package/UA-Mask/Makefile
+package/UA-Mask/openwrt/root/etc/init.d/UAmask
+package/UA-Mask/openwrt/root/etc/config/UAmask
+package/UA-Mask/openwrt/luci/controller/UAmask.lua
+package/UA-Mask/openwrt/luci/model/cbi/UAmask.lua
 "
 
 IN_GIT=1
@@ -57,6 +61,17 @@ for p in $REQUIRED; do
 		note "  ✅ $p"
 	fi
 done
+
+# ---------- 反向校验：不该入库的东西 ----------
+# UA-Mask 上游把编译好的 x86-64 二进制误提交在 core/UAmask（6.5MB），
+# 对固件编译毫无用处、还会白白撑大仓库，所以明确禁止它出现在这里。
+if [ -e package/UA-Mask/core/UAmask ]; then
+	note "  ❌ package/UA-Mask/core/UAmask 不该存在（上游误提交的 x86-64 预编译产物，6.5MB）"
+	note "     → rm -f package/UA-Mask/core/UAmask"
+	FAIL=1
+else
+	note "  ✅ package/UA-Mask/core/UAmask 不存在（已剔除上游误提交的预编译产物）"
+fi
 
 if [ "$FAIL" = 1 ]; then
 	note ""
