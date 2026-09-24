@@ -25,8 +25,9 @@
 ## 二、编译
 
 云端（推荐，与上游一致）：fork 本仓库 → **Actions → QCA-ALL → Run workflow**。
-它默认出两个档：`PURE`（纯净）/ `PLUS`（含 OpenClash/PassWall2/AdGuard 等；**本 fork 已把 Docker 整套去掉**）。
-`Config/GENERAL_AX6600.txt` 对两档都生效；只要 PURE 想额外加东西就新建 `Config/GENERAL_AX6600_PURE.txt`。
+本 fork **默认只编 `PLUS` 档**（含 OpenClash / PassWall2 / AdGuard Home；**Docker 整套已去掉**）。
+想要纯净版：把 `.github/workflows/QCA-ALL.yml` 里 `PROFILE: [PLUS]` 改成 `[PURE, PLUS]`。
+`Config/GENERAL_AX6600.txt` 对所有档都生效；只对某一档生效的写进 `Config/GENERAL_AX6600_<档名>.txt`。
 
 **接线方式**：本仓库自带的 `package/UA-Mask/` 不会被构建系统自动看到（这是配方仓库，不是完整源码树），
 所以 `Scripts/Packages.sh` 末尾加了一段：把 `<仓库根>/package/UA-Mask` 拷进构建树的 `wrt/package/`。
@@ -100,6 +101,25 @@ nft list set inet fw4 UAmask_bypass_set            # 大流量跑一会儿后会
   （**别**用路由器自己 curl 判断 —— UA-Mask 只处理 LAN 侧进来的流量）
 - **TTL 是否真被改**：`WAN=$(uci get network.wan.device || echo wan); tcpdump -ni "$WAN" -c 5 -v icmp`，
   同时从电脑 `ping 223.5.5.5`，看 `ttl 128`
+
+## 四之二、TTL 已经编进固件了
+
+`files/ttl/10-ttl-fix.nft` 由 `Settings.sh` 拷进构建树的
+`package/base-files/files/etc/nftables.d/10-ttl-fix.nft`，所以**刷完就有 TTL 伪装，不用脚本去写**：
+
+```
+chain ttl_fix { type filter hook postrouting priority mangle + 1; policy accept;
+                oifname != { br-lan } ip ttl set 128
+                oifname != { br-lan } ip6 hoplimit set 128 }
+```
+
+- **为什么 128**：伪装人设是 Windows。UA 说自己是哪个系统，TTL 就该对应（Windows=128；Android/Linux/macOS=64），
+  两者矛盾本身就是 DPI 会抓的特征。
+- **改值**：编辑 `/etc/nftables.d/10-ttl-fix.nft` 后 `fw4 reload`；或跑 `campus-onekey.sh` 时给 `TTL_VALUE=64`
+  （脚本检测到固件已有规则就不动它，只在显式给了 `TTL_VALUE` 时才覆盖）。
+- **验证**：`WAN=$(uci get network.wan.device || echo wan); tcpdump -ni "$WAN" -c 5 -v icmp`，
+  同时从电脑 `ping 223.5.5.5`，看输出里的 `ttl 128`。
+- **注意**：NSS 硬件加速卸载后的流可能绕过 netfilter，TTL 改写对这些流未必生效 —— 必须用上面的 tcpdump 实测确认。
 
 ## 五、这张平台特有的两个注意点
 

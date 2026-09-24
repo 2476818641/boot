@@ -93,3 +93,14 @@ else
         echo "Memory patch: current value ($CURRENT_VAL) is sufficient, skipped."
     fi
 fi
+
+# ── 本 fork 新增：把校园网 TTL 规则编进固件 ──────────────────────────────────
+# 目的：刷完就有 TTL 伪装，不需要额外脚本去写。改值编辑 /etc/nftables.d/10-ttl-fix.nft 后 fw4 reload。
+_TTL_SRC="$(cd "$(dirname "$0")/.." && pwd)/files/ttl/10-ttl-fix.nft"
+if [ -f "$_TTL_SRC" ]; then
+	mkdir -p ./package/base-files/files/etc/nftables.d
+	cp -f "$_TTL_SRC" ./package/base-files/files/etc/nftables.d/10-ttl-fix.nft
+	echo "TTL: 已编进固件 /etc/nftables.d/10-ttl-fix.nft（值 $(sed -n 's/.*ip ttl set \([0-9]*\).*/\1/p' "$_TTL_SRC" | head -1)）"
+else
+	echo "⚠️  没找到 $_TTL_SRC —— TTL 规则不会被编进固件"
+fi

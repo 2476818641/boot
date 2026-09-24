@@ -1,0 +1,15 @@
+# 校园网防 TTL 检测 —— 本 fork 直接编进固件（不需要额外脚本）
+#
+# 语义：除 LAN 网桥（br-lan）以外的所有出口，IPv4 TTL 与 IPv6 hop limit 都统一成 128。
+# 为什么是 128：伪装人设是 Windows。UA 说自己是哪个系统，TTL 就该对应 ——
+#   Windows = 128；Android / Linux / macOS / iOS = 64。
+# 两者自相矛盾（比如 Windows 的 UA 配 64 的 TTL）本身就是 DPI 会抓的特征。
+#
+# /etc/nftables.d/ 里的 *.nft 会被 fw4 自动包含进 table inet fw4，开机与每次 fw4 reload 都生效。
+# 改值：编辑本文件后执行 `fw4 reload`；或跑 campus-onekey.sh 时给 TTL_VALUE=64。
+# 关掉：删掉本文件后 `fw4 reload`（sysupgrade 升级固件会恢复成固件里的这版）。
+chain ttl_fix {
+    type filter hook postrouting priority mangle + 1; policy accept;
+    oifname != { br-lan } ip ttl set 128
+    oifname != { br-lan } ip6 hoplimit set 128
+}
