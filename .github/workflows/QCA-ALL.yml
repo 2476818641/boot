@@ -3,6 +3,17 @@ name: QCA-ALL
 
 #CI计划
 on:
+  # 推送即编译。
+  # 为什么要这条：GitHub 规定「手动 Run workflow」只对**默认分支上存在**的工作流可用 ——
+  # 本仓库默认分支是 main（Q30 Pro 那套），这个 ax6600 配方只存在于 ax6600 分支，
+  # 所以 Actions 界面里根本不会出现它的手动按钮；而 push 触发对任何分支都有效。
+  # 只改文档/说明不触发编译（paths-ignore）。
+  push:
+    branches: [ax6600]
+    paths-ignore:
+      - 'Docs/**'
+      - '**.md'
+      - '.gitignore'
   #自动编译：当Auto-Clean运行完成后
   workflow_run:
     workflows: ["Auto-Clean"]
