@@ -136,3 +136,18 @@ UPDATE_VERSION() {
 
 #UPDATE_VERSION "软件包名" "测试版，true，可选，默认为否"
 #UPDATE_VERSION "sing-box"
+
+# ── 本 fork 新增：随仓库分发的 UA-Mask（校园网 UA 伪装）──────────────────────────
+# 配方仓库里的 package/ 不会被构建系统自动看到，所以在这里把它拷进构建树。
+# 本步骤的 cwd 是 wrt/package/（见 WRT-CORE.yml「Custom Packages」步骤）。
+_uamask_repo="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -d "$_uamask_repo/package/UA-Mask" ]; then
+	rm -rf ./UA-Mask
+	cp -r "$_uamask_repo/package/UA-Mask" ./UA-Mask
+	echo "UA-Mask(vendored): 已拷入 wrt/package/UA-Mask（$(find ./UA-Mask -type f | wc -l) 个文件）"
+	if [ -n "${GITHUB_WORKSPACE:-}" ]; then
+		echo "UAmask vendored-in-repo (upstream 83846d3) $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_WORKSPACE/package-versions.txt"
+	fi
+else
+	echo "⚠️  没找到 $_uamask_repo/package/UA-Mask —— uamask 不会被编进固件"
+fi

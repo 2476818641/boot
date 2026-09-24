@@ -165,3 +165,14 @@ CONFIG_PACKAGE_luci-app-wireless-regdb=y
 #老优化，副作用大
 CONFIG_PACKAGE_skb_recycler=n
 
+
+# ── 校园网 UA 伪装（本 fork 新增：UA-Mask，vendored 在 package/UA-Mask）──
+# 只做 UA 改写：默认绕过 22/443（443 不进代理 → Steam 等大流量不受影响），
+# 并把「确认不是 HTTP」的目标卸载到内核（ip daddr . tcp dport @UAmask_bypass_set return）。
+CONFIG_PACKAGE_uamask=y
+# UA-Mask 的 LuCI 页面是 Lua CBI，需要这两个（原配置里已有，显式再声明一次防止被 defconfig 丢掉）
+CONFIG_PACKAGE_luci-compat=y
+CONFIG_PACKAGE_luci-lua-runtime=y
+# 校园网一键脚本要用的运行时（curl 认证 + AES 加密 pass；原配置里已有）
+CONFIG_PACKAGE_curl=y
+CONFIG_PACKAGE_openssl-util=y
