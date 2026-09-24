@@ -1,17 +1,18 @@
 # Plus 版插件配置：在纯净版基础上增加常用服务
 # 注意：本文件会在 GENERAL_AX6600.txt 之后追加，必要时覆盖纯净版的 n 选项。
 
-# Docker / 容器（管理界面统一用 dockerman，避免与 luci-app-docker 重复）
-CONFIG_PACKAGE_luci-app-dockerman=y
-CONFIG_PACKAGE_dockerd=y
-CONFIG_PACKAGE_docker=y
-CONFIG_PACKAGE_docker-compose=y
-CONFIG_PACKAGE_luci-lib-docker=y
-CONFIG_PACKAGE_cgroupfs-mount=y
-CONFIG_PACKAGE_tini=y
-CONFIG_PACKAGE_kmod-veth=y
+# Docker / 容器：本 fork 去掉（用不到，且整套容器栈占闪存与内存）
+# 下面显式写 =n 而不是删行：一是留痕说明"是故意不要"，二是万一有别的包反向依赖，defconfig 会报出来
+CONFIG_PACKAGE_luci-app-dockerman=n
+CONFIG_PACKAGE_dockerd=n
+CONFIG_PACKAGE_docker=n
+CONFIG_PACKAGE_docker-compose=n
+CONFIG_PACKAGE_luci-lib-docker=n
+CONFIG_PACKAGE_cgroupfs-mount=n
+CONFIG_PACKAGE_tini=n
+CONFIG_PACKAGE_kmod-veth=n
 CONFIG_PACKAGE_kmod-ikconfig=y
-CONFIG_PACKAGE_kmod-nf-ipvs=y
+CONFIG_PACKAGE_kmod-nf-ipvs=n	# 只服务于容器/负载均衡，跟着 docker 一起去掉
 CONFIG_PACKAGE_kmod-nf-nat=y
 CONFIG_PACKAGE_kmod-nf-nat6=y
 CONFIG_PACKAGE_kmod-nft-nat=y

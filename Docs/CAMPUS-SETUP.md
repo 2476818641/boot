@@ -25,7 +25,7 @@
 ## 二、编译
 
 云端（推荐，与上游一致）：fork 本仓库 → **Actions → QCA-ALL → Run workflow**。
-它默认出两个档：`PURE`（纯净）/ `PLUS`（含 OpenClash/PassWall2/Docker/AdGuard 等）。
+它默认出两个档：`PURE`（纯净）/ `PLUS`（含 OpenClash/PassWall2/AdGuard 等；**本 fork 已把 Docker 整套去掉**）。
 `Config/GENERAL_AX6600.txt` 对两档都生效；只要 PURE 想额外加东西就新建 `Config/GENERAL_AX6600_PURE.txt`。
 
 **接线方式**：本仓库自带的 `package/UA-Mask/` 不会被构建系统自动看到（这是配方仓库，不是完整源码树），
@@ -49,6 +49,11 @@ make -j$(nproc) 2>&1 | tee build.log
 编译产物在 `bin/targets/qualcommax/*/`（sysupgrade 镜像 + manifest）。**下固件后核对 `grep '^uamask ' *.manifest`**。
 
 ## 三、刷机
+
+> 刷完后的默认地址是 **192.168.1.1**（本 fork 把上游的 192.168.10.1 改掉了；
+> 实现在 `Settings.sh` 里 sed `package/base-files/files/bin/config_generate`），
+> WiFi 默认 `OWRT` / `12345678`，root 无密码（**第一时间设密码**）。
+
 
 用上游的配套资源，不要照搬联发科那套流程（**平台完全不同**）：
 
