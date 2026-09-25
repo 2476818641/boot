@@ -7,6 +7,12 @@
 
 ## 一、加了什么
 
+> **默认只开一个 WiFi**：`imm` / `liuasd111`（5G 的 radio2，QCN6024，ch36 非 DFS）。
+> 另外两个 radio 默认关闭：`radio0`（5G ch100，DFS 信道，默认本来就禁用）、`radio1`（2.4G）。
+> 想开 2.4G（智能插座等）：LuCI → 网络 → 无线 → 启用 radio1，或
+> `uci set wireless.radio1.disabled='0'; uci commit wireless; wifi reload`（它的 SSID 也是 `imm`）。
+
+
 > **默认 LuCI 主题 = Argon**（与 JCG Q30 Pro 那台固件同款）：`luci-theme-argon` +
 > 设置页 `luci-app-argon-config`，默认值由 `files/luci/99-luci-theme`（uci-defaults 改
 > `luci.main.mediaurlbase`）保证。想换回去：LuCI → 系统 → 系统 → 语言和界面，

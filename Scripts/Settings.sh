@@ -120,3 +120,14 @@ if [ -f "$_LT_SRC" ]; then
 else
 	echo "⚠️  没找到 $_LT_SRC —— 默认主题仍是 bootstrap"
 fi
+
+# ── 本 fork：默认只开一个 AP（radio2 5G），SSID=imm 密码=liuasd111 ──────────────
+_WR_SRC="$(cd "$(dirname "$0")/.." && pwd)/files/luci/99-wifi-radio"
+if [ -f "$_WR_SRC" ]; then
+	mkdir -p ./package/base-files/files/etc/uci-defaults
+	cp -f "$_WR_SRC" ./package/base-files/files/etc/uci-defaults/99-wifi-radio
+	chmod +x ./package/base-files/files/etc/uci-defaults/99-wifi-radio
+	echo "WiFi: 已编入 uci-defaults（只开 radio2，SSID=imm）"
+else
+	echo "⚠️  没找到 $_WR_SRC —— WiFi 默认值不会被改"
+fi
