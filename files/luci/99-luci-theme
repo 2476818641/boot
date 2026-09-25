@@ -1,0 +1,11 @@
+#!/bin/sh
+# 本 fork：把 LuCI 默认主题设成 Argon（与 Q30 Pro 那台固件一致）
+#
+# 为什么需要这一步：装上 luci-theme-argon 只是"多了一个可选主题"，
+# LuCI 的默认主题由 /etc/config/luci 里的 main.mediaurlbase 决定，
+# luci-base 默认写的是 /luci-static/bootstrap —— 不改这个，界面还是老的 bootstrap。
+if [ -d /www/luci-static/argon ]; then
+	uci -q set luci.main.mediaurlbase='/luci-static/argon' || true
+	uci -q commit luci || true
+fi
+exit 0

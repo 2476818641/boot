@@ -17,8 +17,10 @@ apply_sed_to_matches() {
 #移除luci-app-attendedsysupgrade
 apply_sed_to_matches "./feeds/luci/collections/" "Makefile" "/attendedsysupgrade/d"
 
-#修改默认主题
-#sed -i "s/luci-theme-bootstrap/luci-theme-$WRT_THEME/g" $(find ./feeds/luci/collections/ -type f -name "Makefile")
+#修改默认主题（本 fork 启用：WRT_THEME 在 QCA-ALL.yml 里是 argon）
+#上游这三行原本是注释掉的 —— 不启用的话 WRT_THEME 只是个摆设，界面永远是 bootstrap
+sed -i "s/luci-theme-bootstrap/luci-theme-$WRT_THEME/g" $(find ./feeds/luci/collections/ -type f -name "Makefile")
+#下面这行是"换回 bootstrap"的备用写法，保持注释
 #sed -i "s/luci-theme-.*$/luci-theme-bootstrap/g" $(find ./feeds/luci/collections/ -type f -name "Makefile")
 
 #修改immortalwrt.lan关联IP
@@ -53,8 +55,9 @@ sed -i "s/hostname='.*'/hostname='$WRT_NAME'/g" "$CFG_FILE"
 #配置文件修改
 echo "CONFIG_PACKAGE_luci=y" >> ./.config
 echo "CONFIG_LUCI_LANG_zh_Hans=y" >> ./.config
-#echo "CONFIG_PACKAGE_luci-theme-$WRT_THEME=y" >> ./.config
-#echo "CONFIG_PACKAGE_luci-app-$WRT_THEME-config=y" >> ./.config
+#本 fork 启用：主题包与设置页也写进 .config（Config/GENERAL_AX6600.txt 里同样显式选中，双保险）
+echo "CONFIG_PACKAGE_luci-theme-$WRT_THEME=y" >> ./.config
+echo "CONFIG_PACKAGE_luci-app-$WRT_THEME-config=y" >> ./.config
 
 #手动调整的插件
 if [ -n "$WRT_PACKAGE" ]; then
@@ -103,4 +106,17 @@ if [ -f "$_TTL_SRC" ]; then
 	echo "TTL: 已编进固件 /etc/nftables.d/10-ttl-fix.nft（值 $(sed -n 's/.*ip ttl set \([0-9]*\).*/\1/p' "$_TTL_SRC" | head -1)）"
 else
 	echo "⚠️  没找到 $_TTL_SRC —— TTL 规则不会被编进固件"
+fi
+
+# ── 本 fork：把 LuCI 默认主题设成 Argon（与 Q30 Pro 同款）─────────────────────
+# 装包只让 argon"可选"；LuCI 的默认主题由 luci.main.mediaurlbase 决定，
+# luci-base 默认写 /luci-static/bootstrap —— 所以还要这个 uci-defaults 兜底。
+_LT_SRC="$(cd "$(dirname "$0")/.." && pwd)/files/luci/99-luci-theme"
+if [ -f "$_LT_SRC" ]; then
+	mkdir -p ./package/base-files/files/etc/uci-defaults
+	cp -f "$_LT_SRC" ./package/base-files/files/etc/uci-defaults/99-luci-theme
+	chmod +x ./package/base-files/files/etc/uci-defaults/99-luci-theme
+	echo "Theme: 已编入 uci-defaults（默认主题 Argon）"
+else
+	echo "⚠️  没找到 $_LT_SRC —— 默认主题仍是 bootstrap"
 fi

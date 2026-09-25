@@ -181,3 +181,9 @@ CONFIG_PACKAGE_openssl-util=y
 # 上游 PURE 档里写的是 =n；firewall4 的依赖本会把它拉回来，这里显式声明，两档都稳。
 CONFIG_PACKAGE_kmod-nft-nat=y
 CONFIG_PACKAGE_kmod-nf-nat=y
+
+# ── 本 fork：默认主题换成 Argon（与 JCG Q30 Pro 那台固件同款）──
+# 主题包与设置页都在源码 feed 里，直接选中即可；"设为默认"由下面 Settings.sh 的
+# 那个 sed + files/luci/99-luci-theme 两处一起保证。
+CONFIG_PACKAGE_luci-theme-argon=y
+CONFIG_PACKAGE_luci-app-argon-config=y

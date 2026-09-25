@@ -7,6 +7,12 @@
 
 ## 一、加了什么
 
+> **默认 LuCI 主题 = Argon**（与 JCG Q30 Pro 那台固件同款）：`luci-theme-argon` +
+> 设置页 `luci-app-argon-config`，默认值由 `files/luci/99-luci-theme`（uci-defaults 改
+> `luci.main.mediaurlbase`）保证。想换回去：LuCI → 系统 → 系统 → 语言和界面，
+> 或 `uci set luci.main.mediaurlbase='/luci-static/bootstrap'; uci commit luci`。
+
+
 | 位置 | 内容 |
 |---|---|
 | `package/UA-Mask/` | [Zesuy/UA-Mask](https://github.com/Zesuy/UA-Mask) 0.4.3 源码（vendored，GPL-3.0-only，upstream commit `83846d3`）+ 我们的 OpenWrt 打包适配与默认配置，见包内 `LOCAL-NOTES.md` |
