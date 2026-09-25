@@ -133,6 +133,32 @@ chain ttl_fix { type filter hook postrouting priority mangle + 1; policy accept;
   同时从电脑 `ping 223.5.5.5`，看输出里的 `ttl 128`。
 - **注意**：NSS 硬件加速卸载后的流可能绕过 netfilter，TTL 改写对这些流未必生效 —— 必须用上面的 tcpdump 实测确认。
 
+## 四之三、版本标注与包源（apk）
+
+- **固件版本**在 `Config/GENERAL_AX6600.txt` 里标注为 `ax6600-snapshot-25.12`
+  （源码是 main/snapshot 分支、内核 6.18，比 25.12 正式线的新；上游默认版本串是裸 `SNAPSHOT`，看不出东西）。
+  查看：`cat /etc/openwrt_release` 或 LuCI 概览页。
+- **默认包源已换成南大镜像**：`https://mirror.nju.edu.cn/immortalwrt/snapshots`
+  （构建时由 `CONFIG_VERSION_REPO` 决定，落地到 `/etc/apk/repositories.d/distfeeds.list`）。
+- 这份固件用 **apk** 不是 opkg。常用命令：
+
+```sh
+cat /etc/apk/repositories.d/distfeeds.list      # 看当前源
+apk update                                       # 更新索引
+apk add htop                                     # 装包（纯用户态的随便装）
+apk add --allow-untrusted /tmp/xxx.apk           # 装自编译/未签名的包
+```
+
+- **换回官方源**（镜像偶尔滞后或缺包时）：
+```sh
+cp /etc/apk/repositories.d/distfeeds.list /root/distfeeds.list.bak
+sed -i 's|mirror\.nju\.edu\.cn/immortalwrt|downloads.immortalwrt.org|g' /etc/apk/repositories.d/distfeeds.list
+apk update
+```
+- **⚠️ snapshot 固件的坑**：源里的包会随内核一起滚动，所以 `kmod-*`（内核模块）过几天就可能版本不匹配、
+  `apk add` 直接失败 —— 这类东西**别在线装，编进固件最稳**（本 fork 加 UA-Mask / TTL / nft-nat 就是这么做的）。
+  纯用户态包（curl、htop、nano、luci 插件…）没这个问题。
+
 ## 五、这张平台特有的两个注意点
 
 1. **NSS / ECM 硬件加速可能绕过 netfilter**：被 NSS 卸载的流不再经过 nftables，TTL 改写对**这些流**

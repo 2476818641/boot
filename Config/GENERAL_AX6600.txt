@@ -187,3 +187,16 @@ CONFIG_PACKAGE_kmod-nf-nat=y
 # 那个 sed + files/luci/99-luci-theme 两处一起保证。
 CONFIG_PACKAGE_luci-theme-argon=y
 CONFIG_PACKAGE_luci-app-argon-config=y
+
+# ── 本 fork：固件版本标注 + 默认包源换国内镜像 ──────────────────────────────
+# 版本串：上游源码跟的是 main/snapshot 分支（内核 6.18），version.mk 里版本兜底值是裸 "SNAPSHOT"，
+# 刷出来 LuCI 概览那行几乎没信息。这里给个明确标注（用户指定）。
+# 落地位置：/etc/openwrt_release、/usr/lib/os-release 的 DISTRIB_RELEASE（%V 替换）。
+CONFIG_VERSION_NUMBER="ax6600-snapshot-25.12"
+
+# 默认包源：官方 downloads.immortalwrt.org 在国内偏慢，有时还要临时 apk add 工具。
+# 换成南京大学镜像（已逐路径实测 200：targets/qualcommax/ipq60xx/packages、
+# packages/aarch64_cortex-a53/{base,luci,packages,routing} 全部与官方一一对应）。
+# 这份固件用的是 apk（不是 opkg），设备端文件是 /etc/apk/repositories.d/distfeeds.list（%U 替换）。
+# 镜像只跟官方 snapshots 通道同步，偶尔可能滞后几小时；真缺包时换回官方即可（见 Docs/CAMPUS-SETUP.md）。
+CONFIG_VERSION_REPO="https://mirror.nju.edu.cn/immortalwrt/snapshots"
