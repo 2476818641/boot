@@ -128,11 +128,11 @@ jobs:
             sed -i '/.cn\//d; /tencent/d; /aliyun/d' "$PROJECT_MIRRORS_FILE"
           fi
 
-          # Plus 版补充 PassWall 依赖包 feed（xray/sing-box 等）。
-          # LuCI 插件本体由 Packages.sh 克隆到 package/，这里不再加 LuCI feed，避免同名包双重定义。
-          if [[ "$WRT_PROFILE" == "PLUS" ]]; then
-            echo "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages" >> feeds.conf.default
-          fi
+          # 本 fork 已移除 PassWall/PassWall2（改用 OpenClash），所以这里不再补 passwall_packages feed
+          #（xray/sing-box/geoview 等原来都由它提供）。要恢复就把下面三行取消注释。
+          # if [[ "$WRT_PROFILE" == "PLUS" ]]; then
+          #   echo "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages" >> feeds.conf.default
+          # fi
 
       - name: Check Scripts
         run: |

@@ -7,6 +7,13 @@
 
 ## 一、加了什么
 
+> **PLUS 档去掉了 PassWall2**（功能与 OpenClash 重叠，只留 OpenClash）。连带去掉 `v2ray-geoip` /
+> `v2ray-geosite` / `geoview`（它们原本是为 PW2 显式加的；OpenClash 自己会下载 geo 数据），
+> 以及构建时只为它加的 `passwall_packages` feed。要恢复：改
+> `Config/GENERAL_AX6600_PLUS.txt` 对应行 + `Scripts/Packages.sh` 的 UPDATE_PACKAGE 行 +
+> `.github/workflows/WRT-CORE.yml` 里那行 feed。
+
+
 > **默认只开一个 WiFi**：`imm` / `liuasd111`（5G 的 radio2，QCN6024，ch36 非 DFS）。
 > 另外两个 radio 默认关闭：`radio0`（5G ch100，DFS 信道，默认本来就禁用）、`radio1`（2.4G）。
 > 想开 2.4G（智能插座等）：LuCI → 网络 → 无线 → 启用 radio1，或
