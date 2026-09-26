@@ -92,8 +92,47 @@ fi
 #局域网唤醒
 #UPDATE_PACKAGE "viking" "ones20250/packages" "main" "" "luci-app-timewol luci-app-wolplus"
 #UPDATE_PACKAGE "vnt" "lmq8267/luci-app-vnt" "main"
-#雅典娜的led屏
-#UPDATE_PACKAGE "athena-led" "unraveloop/JDC-AX6600-Athena-LED-Controller" "main"
+#雅典娜的led屏：改用 unraveloop 版（Rust 核心 + LuCI JS 界面，v2.3.0 起拆成 athena-led + luci-app-athena-led 两包）
+#为什么要钉 v2.4.0 而不是 main：上游 main 的 Makefile 已 bump 到 PKG_VERSION:=2.5.0，
+#但 releases 里最新只有 v2.4.0，跟 main 会在下载阶段 404。
+#"pkg" 模式：把仓库里的 athena-led/ 与 luci-app-athena-led/ 提到 package/ 根层；
+#第五个参数让删除逻辑顺带清掉 feeds 里的同名残留。
+UPDATE_PACKAGE "athena-led" "unraveloop/JDC-AX6600-Athena-LED-Controller" "v2.4.0" "pkg" "luci-app-athena-led"
+
+#基础源码树 ones20250/immortalwrt_ipq 自带一个**同名**的 luci-app-athena-led
+#（package/emortal/luci-app-athena-led，1.0-r20260610，内含预编译 Go 二进制、仓库里没有源码）。
+#不删掉会出现两个同名包，命中 include/scan.awk 按目录尾名取 key 的坑（静默丢一个），
+#而且它的 /usr/sbin/athena-led 会和新包的 /usr/bin/athena-led 并存，init 到底谁生效很难查。
+#顺序很关键：先确认新包到位，再删旧包 —— 万一上游下载失败，宁可保留旧实现也不要两头空。
+if [ -f ./athena-led/Makefile ] && [ -f ./luci-app-athena-led/Makefile ]; then
+	_ATHENA_VER=$(grep -Po '^PKG_VERSION:=\K.*' ./athena-led/Makefile)
+
+	#上游写的是 PKG_HASH:=skip（不校验哈希），这里钉成 v2.4.0 release 的实测 sha256
+	#对应文件：athena-led-aarch64-unknown-linux-musl-v2.4.0.tar.gz
+	_ATHENA_SHA256="243560a5e6bb52e5a493f7efa528771a6ab26e325a69b6e1d9d89647eaac5f3f"
+	sed -i "s|^PKG_HASH:=skip$|PKG_HASH:=$_ATHENA_SHA256|" ./athena-led/Makefile
+	if grep -q "PKG_HASH:=$_ATHENA_SHA256" ./athena-led/Makefile; then
+		echo "athena-led v$_ATHENA_VER: PKG_HASH 已钉为发布包 sha256"
+	else
+		echo "⚠️  athena-led: PKG_HASH 既不是 skip 也不是预期值，请人工确认：$(grep -Po '^PKG_HASH:=\K.*' ./athena-led/Makefile)"
+	fi
+
+	if [ -d ./emortal/luci-app-athena-led ]; then
+		rm -rf ./emortal/luci-app-athena-led
+		echo "已移除旧的一体化实现：package/emortal/luci-app-athena-led"
+	fi
+	if [ -d ./emortal/luci-app-athena-led ]; then
+		echo "❌ 旧包仍在 ./emortal/luci-app-athena-led，会与新包同名冲突，拒绝继续"
+		exit 1
+	fi
+	echo "athena-led v$_ATHENA_VER 就位（新界面：服务 → Athena LED）"
+else
+	echo "❌ athena-led 新包未就位（./athena-led/Makefile 或 ./luci-app-athena-led/Makefile 缺失）"
+	echo "   UPDATE_PACKAGE 大概率失败了。请检查上面的 git clone 输出；"
+	echo "   若是版本问题，改成本仓库 Scripts/Packages.sh 里的分支参数（上游 releases 现有版本见项目 Releases 页）。"
+	echo "   本次直接判失败，避免编出一个 LED 屏还是旧实现的固件。"
+	exit 1
+fi
 
 #更新软件包版本
 UPDATE_VERSION() {
