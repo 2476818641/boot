@@ -125,6 +125,31 @@ if [ -f ./athena-led/Makefile ] && [ -f ./luci-app-athena-led/Makefile ]; then
 		echo "❌ 旧包仍在 ./emortal/luci-app-athena-led，会与新包同名冲突，拒绝继续"
 		exit 1
 	fi
+
+	# 基础树的设备 profile 把 LED 插件硬写进了 DEVICE_PACKAGES（ipq60xx.mk:116）：
+	#   DEVICE_PACKAGES := ... luci-app-athena-led luci-i18n-athena-led-zh-cn
+	# 其中 luci-app-athena-led 我们的新包能提供，但 luci-i18n-athena-led-zh-cn 是旧实现
+	# 靠 feeds/luci/luci.mk 自动生成的 i18n 包 —— 新包自带 lmo、不再生成这个包名，
+	# 于是镜像装配阶段会报：
+	#   ERROR: unable to select packages: luci-i18n-athena-led-zh-cn (no such package)
+	# 所以必须把这处残留一并摘掉。
+	_ATHENA_PROFILE_MK=../target/linux/qualcommax/image/ipq60xx.mk
+	if [ -f "$_ATHENA_PROFILE_MK" ]; then
+		if grep -q 'luci-i18n-athena-led-zh-cn' "$_ATHENA_PROFILE_MK"; then
+			sed -i -e 's/ luci-i18n-athena-led-zh-cn//g' -e 's/luci-i18n-athena-led-zh-cn //g' "$_ATHENA_PROFILE_MK"
+			echo "已从设备 profile 摘掉旧 i18n 包：ipq60xx.mk 的 DEVICE_PACKAGES"
+		fi
+		grep -q 'luci-i18n-athena-led-zh-cn' "$_ATHENA_PROFILE_MK" && {
+			echo "❌ 旧 i18n 包仍在 $_ATHENA_PROFILE_MK，镜像装配会失败，拒绝继续"
+			exit 1
+		}
+		grep -q 'luci-app-athena-led' "$_ATHENA_PROFILE_MK" \
+			|| echo "⚠️  设备 profile 里没有 luci-app-athena-led，界面可能不会被预装（可忽略）"
+		echo "设备 profile DEVICE_PACKAGES 已核对：$(grep -n 'DEVICE_PACKAGES.*athena' "$_ATHENA_PROFILE_MK")"
+	else
+		echo "⚠️  找不到 $_ATHENA_PROFILE_MK，跳过 DEVICE_PACKAGES 修补（若装配阶段报 luci-i18n-athena-led-zh-cn 缺失，就是这里）"
+	fi
+
 	echo "athena-led v$_ATHENA_VER 就位（新界面：服务 → Athena LED）"
 else
 	echo "❌ athena-led 新包未就位（./athena-led/Makefile 或 ./luci-app-athena-led/Makefile 缺失）"
