@@ -28,10 +28,15 @@
 #   这也解释了历史疑问："旧路由器单用 UA-Mask 不行、加 UA3F 就行" ——
 #   UA3F 是 tcp dport != {22}，连 443 也在本机中转，根本不需要转发。
 #
-# 修法：只把入站 TCP 里 ttl <= 2 的异常值补回 64。正常互联网包是 50-60，
+# 修法：只把入站包里 ttl <= 2 的异常值补回 64。正常互联网包是 50-60，
 # 不会被碰到；ttl 1 在正常路径上不可能出现，所以这个匹配非常安全。
-# 只写 tcp：ICMP/UDP 实测正常（客户端 ping 通就是证据）。若日后发现 QUIC
-# 或游戏 UDP 有同样问题，把 `ip protocol tcp` 去掉即可。
+#
+# ★ 2026-09 补充实测：校园网关对 UDP 做**同样处理**，所以 TCP 与 UDP 都要修：
+#   · 只修 TCP → 客户端 HTTPS 正常，但 LoL / Steam / ARK 这类 UDP 为主的
+#     游戏全部连不上；
+#   · 把 UDP 也补上 → 游戏立刻恢复。
+#   排查提示：UA-Mask 的 nft 链写死 `ip protocol tcp`，UDP 根本不经过它，
+#   所以「停掉 UA-Mask 仍然不通」是正常现象，不要往 UA-Mask 方向查。
 #
 # /etc/nftables.d/ 里的 *.nft 会被 fw4 自动包含进 table inet fw4，开机与每次 fw4 reload 都生效。
 # 改值：编辑本文件后执行 `fw4 reload`；或跑 campus-onekey.sh 时给 TTL_VALUE=64。
@@ -45,4 +50,5 @@ chain ttl_fix {
 chain ttl_fix_in {
     type filter hook prerouting priority mangle; policy accept;
     iifname "wan" ip protocol tcp ip ttl 0-2 ip ttl set 64
+    iifname "wan" ip protocol udp ip ttl 0-2 ip ttl set 64
 }
