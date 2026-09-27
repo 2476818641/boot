@@ -81,7 +81,15 @@ fi
 
 #UPDATE_PACKAGE "ddns-go" "sirpdboy/luci-app-ddns-go" "main"
 #UPDATE_PACKAGE "diskman" "lisaac/luci-app-diskman" "master"
-#UPDATE_PACKAGE "easytier" "EasyTier/luci-app-easytier" "main"
+
+#虚拟局域网（EasyTier）：与朋友的 Astral 房间互通，配 /etc/easytier-onekey.sh 使用
+#为什么要钉 v2.6.4 而不是 main：easytier 的 Makefile 会用 PKG_VERSION 去 EasyTier 的
+#release 下载对应版本的预编译 zip（easytier-linux-aarch64-v<版本>.zip），跟 main 一旦
+#版本号对不上就 404。v2.6.4 是当前 release，也是实测跑通（NAT3 直连）的那版。
+#"pkg" 模式会把仓库里的 easytier/ 与 luci-app-easytier/ 提到 package/ 根层
+#（easytier-noweb/ 会一起拷进来，但不选它就不进固件）。
+UPDATE_PACKAGE "easytier" "EasyTier/luci-app-easytier" "v2.6.4" "pkg"
+
 #UPDATE_PACKAGE "gecoosac" "laipeng668/luci-app-gecoosac" "main"
 #UPDATE_PACKAGE "netspeedtest" "sirpdboy/netspeedtest" "main" "" "homebox speedtest"
 #UPDATE_PACKAGE "openlist2" "sbwml/luci-app-openlist2" "main"

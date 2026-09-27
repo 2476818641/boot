@@ -158,3 +158,24 @@ if [ -f "$_AGH_WIRE_SRC" ]; then
 else
 	echo "⚠️  没找到 $_AGH_WIRE_SRC —— AGH 默认不会启用，dnsmasq 也不会指向它"
 fi
+
+# ── 本 fork：把校园网/联机脚本编进固件（刷完直接能跑，不用 wget）───────────────
+# 脚本源头在 Login-edu 仓库（school-onekey 分支），这里放的是**快照**：
+#   campus-onekey.sh   → /etc/campus-onekey.sh    校园网：UA 伪装 + 门户认证 + 双向 TTL + 启动项
+#   easytier-onekey.sh → /etc/easytier-onekey.sh  联机：EasyTier 虚拟网 + 游戏端口转发 + 内网路由
+# 脚本不会自我更新：要用最新版就在路由器上 wget 覆盖（用法见各自 --help）。
+_SCRIPTS_SRC="$(cd "$(dirname "$0")/.." && pwd)/files/scripts"
+if [ -d "$_SCRIPTS_SRC" ]; then
+	mkdir -p ./package/base-files/files/etc
+	for _f in campus-onekey.sh easytier-onekey.sh; do
+		if [ -f "$_SCRIPTS_SRC/$_f" ]; then
+			cp -f "$_SCRIPTS_SRC/$_f" "./package/base-files/files/etc/$_f"
+			chmod 0755 "./package/base-files/files/etc/$_f"
+			echo "Scripts: 已编进固件 /etc/$_f（$(wc -c < "$_SCRIPTS_SRC/$_f") 字节）"
+		else
+			echo "⚠️  没找到 $_SCRIPTS_SRC/$_f —— 该脚本不会进固件"
+		fi
+	done
+else
+	echo "⚠️  没找到 $_SCRIPTS_SRC —— 一键脚本不会被编进固件"
+fi
