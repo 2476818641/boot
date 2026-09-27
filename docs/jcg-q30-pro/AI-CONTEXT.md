@@ -327,7 +327,8 @@ Notes / gotchas:
 
 ```yaml
 repo: ImmortalWrt rebase (MTK mt798x), branch 25.12, remote chasey-dev via ghproxy
-tree_state: HEAD == origin/25.12; only local edit = scripts/download.pl (ghproxy rewrite, now https?)
+tree_state: HEAD == origin/25.12; local edits = scripts/download.pl (ghproxy rewrite) +
+            package/system/zram-swap (加了 uci-defaults 让 zram 默认启用，见 §10f)
 build_cmd: export FORCE_UNSAFE_CONFIGURE=1 && export GOPROXY=https://goproxy.cn,direct && make -j$(nproc) V=s
            # FORCE_UNSAFE_CONFIGURE: root build, GNU tar configure refuses otherwise
            # GOPROXY: UA-Mask is a Go package; proxy.golang.org is unreachable from this host, goproxy.cn works
@@ -610,6 +611,54 @@ sh package/UA-Mask/openwrt/tests/procd-contract-test.sh      # start_service con
 ```
 Both pass with the local defaults (they build the Go binary themselves — export `GOMODCACHE`/`GOPROXY=off`
 as in trap 3 if the host has no network).
+
+---
+
+## 10f. OOM REBOOT on the 256MB unit (2026-09-22) — zram was installed but never enabled
+
+**Symptom:** the unit rebooted by itself; `free -m` (busybox prints **KB** despite the `-m`) showed
+`MemTotal 238672 / used 195924 / free 23660 / **available 8568**` — i.e. ~8 MiB available in steady state.
+
+**Root cause found:** `zram-swap` **is installed in every image but nothing ever enables it.**
+Upstream `package/system/zram-swap` only ships `files/zram.init`; there is no uci-defaults and no
+`enable` anywhere, so `/etc/rc.d/S15zram` never exists → **no swap at all**. Verified by listing the
+assembled rootfs: `ls build_dir/target-*/root-mediatek/etc/rc.d/` has no `S*zram` entry.
+
+**Fix shipped in this repo:** `package/system/zram-swap/files/zram.defaults` → installed as
+`/etc/uci-defaults/99-zram`. It enables + starts zram only when `MemTotal <= 512MiB`, and the size is
+the script's own default (`MemTotal/2048` → 128MiB on a 256MB box). Verified the file lands inside
+`bin/packages/aarch64_cortex-a53/base/zram-swap-32.apk`.
+
+**Also removed from `.config` (deliberate, they cost RAM/flash and go unused):**
+`sing-box`, `smartdns`, `chinadns-ng`, `microsocks`, `mwan3`, `luci-app-passwall`,
+`luci-app-smartdns`, `luci-app-mwan3` (+ their 3 `luci-i18n-*-zh-cn` deps, dropped automatically by
+`make defconfig`). Note `passwall` **core was never installed** — only its LuCI app was selected, so
+those "routing" components were pure waste. `scripts/required-packages.txt` was updated accordingly
+and now also requires `zram-swap`/`kmod-zram` so a future silent drop fails the build.
+
+**On a live unit (no reflash needed):**
+
+```sh
+/etc/init.d/zram enable && /etc/init.d/zram start      # 立刻有 128MiB 压缩交换
+uci set system.@system[0].zram_size_mb='192'; uci commit system; /etc/init.d/zram restart
+for s in sing-box chinadns-ng microsocks smartdns mwan3; do /etc/init.d/$s stop; /etc/init.d/$s disable; done
+```
+
+**Go processes need an explicit ceiling.** UA3F (and UA-Mask) are Go: heap growth is unbounded until
+the OOM killer arrives. Go >= 1.19 honours `GOMEMLIMIT`; both init scripts already pass env vars through
+procd, so append to the *installed* init script (overlay, survives until reflash):
+
+```sh
+cp /etc/init.d/ua3f /root/ua3f.init.bak
+sed -i '/procd_set_param command/a\    procd_append_param env GOMEMLIMIT=48MiB GOGC=50' /etc/init.d/ua3f
+/etc/init.d/ua3f restart
+```
+
+**Diagnosis that is still outstanding** (the package trim does not necessarily free runtime RAM, because
+none of those services were enabled): get per-process RSS
+(`for d in /proc/[0-9]*; do awk -v p=${d#/proc/} '{printf "%7.1f MB pid=%s\n",$2*4/1024,p}' $d/statm; done | sort -rn | head`)
+plus `grep -E 'Slab|SUnreclaim|Shmem' /proc/meminfo` and `dmesg | grep -i 'killed process'` — on MT7981 the
+usual hogs are the mtwifi driver (kernel slab), the Go UA process, and uhttpd/LuCI.
 
 ---
 

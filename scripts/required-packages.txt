@@ -25,11 +25,17 @@ luci-app-turboacc-mtk
 # —— 界面与常用组件（丢了说明整个 feeds 选择都歪了）——
 luci-base
 luci-theme-argon
-luci-app-passwall
-mwan3
-smartdns
 dnsmasq-full
 wpad-openssl
+# 2026-09-22 故意移除：passwall/mwan3/smartdns/sing-box/chinadns-ng/microsocks 及对应 luci-app
+# 原因：这台机器只有 256MB 内存、常态可用仅剩 8MB，会 OOM 杀进程重启；而用户"只上网+认证+加速器"，
+# 这些分流/多拨/DNS 组件全都用不到。镜像更小、常驻更少。
+
+# —— 内存兜底（256MB 机型必须启用 zram 交换，否则峰值必 OOM 重启）——
+# 上游 zram-swap 只装 init 脚本、没有任何东西 enable 它（包内无 uci-defaults），
+# 本仓库在 package/system/zram-swap 里加了 uci-defaults 让它首次启动就生效。
+zram-swap
+kmod-zram
 
 # —— 刷机/救砖必需 ——
 mtd

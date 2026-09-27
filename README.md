@@ -60,7 +60,7 @@
 | 部件 | 规格 |
 |---|---|
 | SoC | MediaTek **MT7981B**（2×Cortex-A53 @1300MHz）|
-| 内存 | **DDR3 256MB**（Nanya NT5CC128M16JR-EK，1866Mbps）|
+| 内存 | **DDR3 256MB**（Nanya NT5CC128M16JR-EK，1866Mbps）—— 已默认启用 **zram 交换（128MiB）**，否则常态可用只剩 ~8MiB 会 OOM 重启（见 AI-CONTEXT §10f）|
 | 闪存 | **SPI-NAND 128MB**（Winbond，块 128KiB / 页 2048 / OOB 64）|
 | 交换芯片 | MT7531（DSA，lan1~lan3 + wan）|
 | 串口 | **115200 8N1、3.3V**（板上为空焊盘，需探针或飞线）|

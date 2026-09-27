@@ -1,0 +1,24 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# 本文件是**本仓库的改动**（上游 zram-swap 只装 /etc/init.d/zram，没有任何东西去 enable 它）：
+# 结果就是"包装了、但没启用"，小内存机型全程无交换分区 —— 256MB 的 MT7981 在
+# 易用内存只剩几 MB 时会被 OOM 杀进程并重启（2026-09-22 真机实测：可用 8.4MB、
+# dmesg 里有 oom-kill，重启后 zram 仍是未启用状态）。
+#
+# 只在"小内存设备"上默认打开，软路由（≥512MB）不需要：
+#   MemTotal <= 512MiB 时 enable + start
+# 大小由 init 脚本决定：缺省 = MemTotal/2048，即 256MB 机器 → 128MiB，
+# 128MB 机器 → 64MiB（zram 只在实际存放页面时才占内存，给大不亏）。
+# 想手动指定：uci set system.@system[0].zram_size_mb='192'; uci commit system
+
+mem_kb="$(sed -n 's/^MemTotal:[[:space:]]*\([0-9]*\).*/\1/p' /proc/meminfo)"
+[ -n "$mem_kb" ] || exit 0
+[ "$mem_kb" -le 524288 ] || exit 0	# >512MiB 的机器不动
+
+[ -x /etc/init.d/zram ] || exit 0
+
+/etc/init.d/zram enable
+/etc/init.d/zram start
+
+exit 0

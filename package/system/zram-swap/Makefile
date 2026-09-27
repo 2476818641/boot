@@ -43,6 +43,9 @@ endef
 define Package/zram-swap/install
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/zram.init $(1)/etc/init.d/zram
+	# 本仓库改动：上游只装 init 脚本、没人 enable 它，小内存机型等于没有交换分区（会 OOM 重启）
+	$(INSTALL_DIR) $(1)/etc/uci-defaults
+	$(INSTALL_BIN) ./files/zram.defaults $(1)/etc/uci-defaults/99-zram
 endef
 
 $(eval $(call BuildPackage,zram-swap))
