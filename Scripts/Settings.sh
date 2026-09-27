@@ -131,3 +131,30 @@ if [ -f "$_WR_SRC" ]; then
 else
 	echo "⚠️  没找到 $_WR_SRC —— WiFi 默认值不会被改"
 fi
+
+# ── 本 fork：把 AdGuard Home 的可用配置编进固件 ─────────────────────────────
+# 两个文件缺一不可：
+#   adguardhome.yaml    → 决定 AGH 监听什么（5625、bind 127.0.0.1+192.168.1.1、DoH 上游、
+#                         ratelimit=0、os.rlimit_nofile=0 等，都是实机踩坑后的值）
+#   99-adguardhome-wire → uci-defaults，决定「谁来用它」：启用 AGH + 把 dnsmasq 上游指过去
+# 注意：yaml 里的 os.rlimit_nofile 必须是 0 —— AGH 在 procd jail 里没有 CAP_SYS_RESOURCE，
+# 非 0 会让 setrlimit 返回 EPERM 并 [fatal] 退出。
+_AGH_CONF_SRC="$(cd "$(dirname "$0")/.." && pwd)/files/adguardhome/adguardhome.yaml"
+if [ -f "$_AGH_CONF_SRC" ]; then
+	mkdir -p ./package/base-files/files/etc/adguardhome
+	cp -f "$_AGH_CONF_SRC" ./package/base-files/files/etc/adguardhome/adguardhome.yaml
+	chmod 600 ./package/base-files/files/etc/adguardhome/adguardhome.yaml
+	echo "AdGuardHome: 已编进固件 /etc/adguardhome/adguardhome.yaml（端口 5625，DoH 上游 Ali/Tencent）"
+else
+	echo "⚠️  没找到 $_AGH_CONF_SRC —— AGH 会用首次运行向导生成的空配置"
+fi
+
+_AGH_WIRE_SRC="$(cd "$(dirname "$0")/.." && pwd)/files/adguardhome/99-adguardhome-wire"
+if [ -f "$_AGH_WIRE_SRC" ]; then
+	mkdir -p ./package/base-files/files/etc/uci-defaults
+	cp -f "$_AGH_WIRE_SRC" ./package/base-files/files/etc/uci-defaults/99-adguardhome-wire
+	chmod +x ./package/base-files/files/etc/uci-defaults/99-adguardhome-wire
+	echo "AdGuardHome: 已编入 uci-defaults（启用 AGH + dnsmasq → 127.0.0.1#5625 + noresolv=1）"
+else
+	echo "⚠️  没找到 $_AGH_WIRE_SRC —— AGH 默认不会启用，dnsmasq 也不会指向它"
+fi

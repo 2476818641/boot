@@ -1,9 +1,37 @@
-# 校园网防 TTL 检测 —— 本 fork 直接编进固件（不需要额外脚本）
+# 校园网防 TTL 检测（双向）—— 本 fork 直接编进固件（不需要额外脚本）
 #
+# ── 出站 ────────────────────────────────────────────────────────────────
 # 语义：除 LAN 网桥（br-lan）以外的所有出口，IPv4 TTL 与 IPv6 hop limit 都统一成 128。
 # 为什么是 128：伪装人设是 Windows。UA 说自己是哪个系统，TTL 就该对应 ——
 #   Windows = 128；Android / Linux / macOS / iOS = 64。
 # 两者自相矛盾（比如 Windows 的 UA 配 64 的 TTL）本身就是 DPI 会抓的特征。
+#
+# ── 入站（2026-09 实测新增）─────────────────────────────────────────────
+# 现象：AX6600 上客户端 HTTPS 全部连接超时（curl: Failed to connect ...
+#       port 443 after 21s），而路由器自己 curl 同一站点完全正常。
+# 抓包实锤（tcpdump -ni any -vv 'tcp port 443'）：
+#   客户端 SYN 出去正常（wan Out, ttl 128），服务器 SYN-ACK 也回来了，
+#   但**所有**入站 SYN-ACK 的 TTL 都是 1：
+#       104.69.162.222.443 > 10.30.176.186.56562: Flags [S.], ttl 1
+#       23.35.148.140.443 > 10.30.176.186.52200: Flags [S.], ttl 1
+#       183.240.99.224.443 > 10.30.176.186.52206: Flags [S.], ttl 1
+#       140.82.113.25.443  > 10.30.176.186.49194: Flags [S.], ttl 1
+#   Linux 转发时必须把 TTL 减 1：1 → 0 → 内核判定超时直接丢弃，
+#   于是 SYN-ACK 永远到不了客户端，客户端无限重发 SYN。
+#
+# 为什么"路由器自己通、客户端不通"：
+#   · 路由器本机的连接是**本地投递**，不做转发、不减 TTL → ttl 1 完全合法；
+#   · 客户端 :80 被 UA-Mask REDIRECT 到本机 :12032，由路由器重新发起出网连接
+#     再回给客户端 → 同样不经过 IP 转发 → 也是"通"的（假象！）；
+#   · 客户端 :443 在 UA-Mask 里被豁免（为了 Steam 大流量），走真正的
+#     客户端→NAT→网关 转发路径 → 第一次真正撞上 ttl 1 这堵墙。
+#   这也解释了历史疑问："旧路由器单用 UA-Mask 不行、加 UA3F 就行" ——
+#   UA3F 是 tcp dport != {22}，连 443 也在本机中转，根本不需要转发。
+#
+# 修法：只把入站 TCP 里 ttl <= 2 的异常值补回 64。正常互联网包是 50-60，
+# 不会被碰到；ttl 1 在正常路径上不可能出现，所以这个匹配非常安全。
+# 只写 tcp：ICMP/UDP 实测正常（客户端 ping 通就是证据）。若日后发现 QUIC
+# 或游戏 UDP 有同样问题，把 `ip protocol tcp` 去掉即可。
 #
 # /etc/nftables.d/ 里的 *.nft 会被 fw4 自动包含进 table inet fw4，开机与每次 fw4 reload 都生效。
 # 改值：编辑本文件后执行 `fw4 reload`；或跑 campus-onekey.sh 时给 TTL_VALUE=64。
@@ -12,4 +40,9 @@ chain ttl_fix {
     type filter hook postrouting priority mangle + 1; policy accept;
     oifname != { br-lan } ip ttl set 128
     oifname != { br-lan } ip6 hoplimit set 128
+}
+
+chain ttl_fix_in {
+    type filter hook prerouting priority mangle; policy accept;
+    iifname "wan" ip protocol tcp ip ttl 0-2 ip ttl set 64
 }

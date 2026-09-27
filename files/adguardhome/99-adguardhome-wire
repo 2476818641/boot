@@ -1,0 +1,42 @@
+#!/bin/sh
+#
+# 首次启动就把 AdGuard Home 拉起来并接进 DNS 链路（本 fork 新增）
+#
+# 目标链路：客户端 → dnsmasq:53（DHCP / nftset / .lan 本地域名）
+#                  → AGH:5625（拦截 + 缓存）
+#                  → Ali / Tencent DoH（加密上游）
+#
+# 配套文件：/etc/adguardhome/adguardhome.yaml（随固件分发，见 files/adguardhome/）
+# 二者都要有：yaml 决定 AGH 监听什么，本脚本决定「谁来用它」。
+#
+# 背靠的坑（都是实机踩过的，改之前先看一眼）：
+#   1) /etc/config/adguardhome 出厂默认 enabled=0 → 不启用的话 yaml 根本不会被创建；
+#   2) AGH 跑在 procd jail 里，yaml 里 os.rlimit_nofile 必须是 0，
+#      否则 setrlimit 返回 EPERM → [fatal] 退出，respawn 反复失败；
+#   3) dnsmasq 的 noresolv=1 意味着「不再用校园网下发的 DNS」。如果这网在
+#      **未认证前**会挡掉外网 53/DoH，会出现认证页面域名都解析不了的情况。
+#      退路：uci set dhcp.@dnsmasq[0].noresolv='0'; uci commit dhcp; /etc/init.d/dnsmasq restart
+#      或把校园网 DNS 加进 yaml 的 bootstrap_dns 当垫脚石。
+#
+# uci-defaults 只在（该文件名的）首次启动执行一次；失败会保留重试。
+# 换脚本内容时请改文件名或手动跑一次，否则已刷过的机器不会重新执行。
+
+[ -x /usr/bin/AdGuardHome ] || exit 0
+
+# ── 1. 启用 AGH 本体 ────────────────────────────────────────────────
+uci -q set adguardhome.config.enabled='1'
+uci -q set adguardhome.config.work_dir='/etc/adguardhome/work'
+uci -q set adguardhome.config.config_file='/etc/adguardhome/adguardhome.yaml'
+uci -q commit adguardhome
+/etc/init.d/adguardhome enable 2>/dev/null
+
+# ── 2. 把 dnsmasq 的上游指向 AGH ────────────────────────────────────
+# 清掉原有 server 列表（含校园网下发/手工加的），只留 AGH
+while uci -q delete dhcp.@dnsmasq[0].server; do :; done
+uci -q add_list dhcp.@dnsmasq[0].server='127.0.0.1#5625'
+# noresolv=1：不再读 /etc/resolv.conf（校园网 DHCP 下发的 DNS 会被忽略）
+uci -q set dhcp.@dnsmasq[0].noresolv='1'
+uci -q set dhcp.@dnsmasq[0].cachesize='1000'
+uci -q commit dhcp
+
+exit 0
