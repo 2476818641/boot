@@ -83,12 +83,47 @@ fi
 #UPDATE_PACKAGE "diskman" "lisaac/luci-app-diskman" "master"
 
 #虚拟局域网（EasyTier）：与朋友的 Astral 房间互通，配 /etc/easytier-onekey.sh 使用
+#
+#为什么不用上面那个 UPDATE_PACKAGE（踩过坑，已实测复现）：
+#  这个仓库的**目录名与包名相同**（luci-app-easytier），pkg 模式下
+#    find "./luci-app-easytier"/*/ -iname "*easytier*" -prune -exec cp -rf {} ./ \;
+#  会把 luci-app-easytier/ 拷进同名的 clone 目录里（cp 遇到已存在的同名目录就嵌套进去），
+#  紧接着的 rm -rf "./luci-app-easytier/" 又把刚拷进去的那个包一起删掉。
+#  结果：easytier / easytier-noweb 正常，唯独 luci-app-easytier 消失 —— 症状是最终
+#  .config 里连 "# CONFIG_PACKAGE_luci-app-easytier is not set" 都没有（符号不存在），
+#  固件里也就没有 /etc/init.d/easytier（EasyTier 起了也没法开机自启/重启）。
+#  所以这里显式 clone 到独立目录名，再一个个拷出来。
+#
 #为什么要钉 v2.6.4 而不是 main：easytier 的 Makefile 会用 PKG_VERSION 去 EasyTier 的
-#release 下载对应版本的预编译 zip（easytier-linux-aarch64-v<版本>.zip），跟 main 一旦
-#版本号对不上就 404。v2.6.4 是当前 release，也是实测跑通（NAT3 直连）的那版。
-#"pkg" 模式会把仓库里的 easytier/ 与 luci-app-easytier/ 提到 package/ 根层
-#（easytier-noweb/ 会一起拷进来，但不选它就不进固件）。
-UPDATE_PACKAGE "easytier" "EasyTier/luci-app-easytier" "v2.6.4" "pkg"
+#  release 下载 easytier-linux-aarch64-v<版本>.zip，跟 main 一旦版本号对不上就 404。
+#  v2.6.4 是当前 release，也是实测跑通（NAT3 直连）的那版。
+_EASYTIER_TAG="v2.6.4"
+if [ -f ./easytier/Makefile ] && [ -f ./luci-app-easytier/Makefile ]; then
+	echo "EasyTier: 构建树里已存在，跳过拉取"
+else
+	# 清掉 feeds 里的同名残留（与 UPDATE_PACKAGE 的删除逻辑等价）
+	find ../feeds/luci/ ../feeds/packages/ -maxdepth 3 -type d -iname "*easytier*" 2>/dev/null | while read -r d; do
+		rm -rf "$d"
+		echo "Delete directory: $d"
+	done
+	rm -rf ./et-app-src
+	if git clone --depth=1 --single-branch --branch "$_EASYTIER_TAG" \
+			https://github.com/EasyTier/luci-app-easytier.git ./et-app-src; then
+		_EASYTIER_COMMIT=$(git -C ./et-app-src rev-parse --short HEAD 2>/dev/null || echo unknown)
+		rm -rf ./easytier ./luci-app-easytier ./easytier-noweb
+		cp -rf ./et-app-src/easytier           ./easytier
+		cp -rf ./et-app-src/luci-app-easytier  ./luci-app-easytier
+		cp -rf ./et-app-src/easytier-noweb     ./easytier-noweb
+		rm -rf ./et-app-src
+		echo "EasyTier $_EASYTIER_TAG ($_EASYTIER_COMMIT) 就位：easytier + luci-app-easytier"
+		if [ -n "${GITHUB_WORKSPACE:-}" ]; then
+			echo "easytier EasyTier/luci-app-easytier $_EASYTIER_TAG $_EASYTIER_COMMIT" >> "$GITHUB_WORKSPACE/package-versions.txt"
+		fi
+	else
+		echo "❌ EasyTier 拉取失败（$_EASYTIER_TAG）—— 虚拟局域网不会进固件"
+		exit 1
+	fi
+fi
 
 #UPDATE_PACKAGE "gecoosac" "laipeng668/luci-app-gecoosac" "main"
 #UPDATE_PACKAGE "netspeedtest" "sirpdboy/netspeedtest" "main" "" "homebox speedtest"
