@@ -163,7 +163,7 @@ easytier-cli route      # 子网代理网段
 |---|---|
 | [`Docs/刷机救砖教程.md`](Docs/刷机救砖教程.md) | 刷机、救砖、双系统 GPT 分区、U-Boot 与 EDL 流程、本 fork 的差异说明 |
 | [`Docs/CAMPUS-SETUP.md`](Docs/CAMPUS-SETUP.md) | 校园网接入整体方案（伪装 / 认证 / TTL / 联机 / DNS） |
-| [`Docs/校园网检测项自查.md`](Docs/校园网检测项自查.md) | **排查手册**：TTL / UA / MAC 三项最小验证法与判读表、"减法思维"优先级、IPID 与 DPI 的边界说明 |
+| [`Docs/校园网检测项自查.md`](Docs/校园网检测项自查.md) | **排查手册**：如果出现问题请自行查看|
 | [`Login-edu`](https://github.com/2476818641/Login-edu) | 两个一键脚本的源头与用法（固件内是快照，脚本不自我更新） |
 
 ---
