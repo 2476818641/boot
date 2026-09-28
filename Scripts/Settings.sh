@@ -179,3 +179,18 @@ if [ -d "$_SCRIPTS_SRC" ]; then
 else
 	echo "⚠️  没找到 $_SCRIPTS_SRC —— 一键脚本不会被编进固件"
 fi
+
+# ── 本 fork：修 /etc/init.d/easytier 的执行权限 ──────────────────────────────
+# luci-app-easytier 把 init 脚本装成 0644，靠包内 postinst chmod +x；但镜像装配用
+# `apk --no-scripts`，postinst 不执行 → 镜像里该文件一直是 0644（实测：而正常包
+# 如 adguardhome 是 0755）→ 首次开机后 /etc/init.d/easytier 无法执行。
+# 用一个 uci-defaults 在首次启动兜底修一次。
+_ET_PERM_SRC="$(cd "$(dirname "$0")/.." && pwd)/files/easytier/99-easytier-init-perm"
+if [ -f "$_ET_PERM_SRC" ]; then
+	mkdir -p ./package/base-files/files/etc/uci-defaults
+	cp -f "$_ET_PERM_SRC" ./package/base-files/files/etc/uci-defaults/99-easytier-init-perm
+	chmod +x ./package/base-files/files/etc/uci-defaults/99-easytier-init-perm
+	echo "EasyTier: 已编入 uci-defaults（首次启动修正 /etc/init.d/easytier 权限为 0755）"
+else
+	echo "⚠️  没找到 $_ET_PERM_SRC —— 首次开机后 /etc/init.d/easytier 可能是 0644（跑不了）"
+fi

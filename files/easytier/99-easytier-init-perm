@@ -1,0 +1,22 @@
+#!/bin/sh
+#
+# 兜底修正 /etc/init.d/easytier 的可执行权限（本 fork 新增）
+#
+# 为什么需要：luci-app-easytier 包把 /etc/init.d/easytier 装成 0644，靠包内
+# postinst 里的 `chmod +x` 修正权限。但 OpenWrt 装配镜像时用的是
+#   apk --no-logfile --preserve-env --no-scripts ...
+# —— `--no-scripts` 意味着 postinst **不会执行**，于是镜像里那个文件一直是 0644。
+# 后果：首次开机后 `/etc/init.d/easytier start|enable` 会 Permission denied，
+# LuCI 里点"启动/开机自启"也报错（文件在，但没有执行位）。
+#
+# 实测对照（squashfs 里直接看）：easytier 是 0644，而正常包如 adguardhome 是 0755。
+#
+# 这个 uci-defaults 在首次启动时跑一次；已可执行就什么都不做（幂等）。
+# 换内容请改文件名，或手动执行一次，否则已刷过的机器不会重跑。
+
+[ -f /etc/init.d/easytier ] || exit 0
+[ -x /etc/init.d/easytier ] && exit 0
+
+chmod 0755 /etc/init.d/easytier
+logger -t easytier-defaults "已修正 /etc/init.d/easytier 权限为 0755（包的 postinst 在镜像装配时被 --no-scripts 跳过）"
+exit 0
