@@ -109,6 +109,40 @@ sh /root/campus-onekey.sh 你的学号 你的密码
 
 以后：`/root/campus-onekey.sh --status` / `--auth` / `--uninstall`。
 
+### ⚠️ 换学校要改什么（重要）
+
+**下面的脚本是本校专用的**：门户地址、接口路径、字段名、加密密钥全部按本校门户写死。
+换学校直接跑必然失败。要改的只有脚本开头那段「本校参数」：
+
+| 参数 | 本校值（示例） | 你该怎么找到自己学校的值 |
+|---|---|---|
+| `PORTAL` | `http://10.30.100.5` | 未认证时浏览器被跳转到哪里（门户地址，可能是 IP 也可能是域名） |
+| `PRE_GET` / `PRE_PATHS` | `1` / `/api/ip.php` | 登录前是否要先 GET 首页拿会话 cookie，以及前置接口叫什么 |
+| `API_PATHS` | `/api/login.php,/api/stat.php,/api/ack_auth.php` | F12 → 网络面板，点一次登录，看依次发出哪些请求 |
+| `EXTRA_FIELDS` | `authmode=0&pool=&isp_id=0&pxyacct=` | 登录请求里那些固定不变的附加字段 |
+| `USER_FIELD` / `PASS_FIELD` | `user` / `pass` | 登录请求里的字段名（不一定是 user/pass） |
+| `RAAS_KEY` | `5a3b9f207411a8ed` | 门户 JS 里的 AES 密钥；本 portal 的 `pass` = `hex(AES-128-ECB(key, 4位随机前缀 + 密码))` |
+| `RET_ACCEPT` / `RET_RETRY` | `0 3 121 122` / `2 3 4` | 门户返回码的含义（哪些算成功、哪些算"处理中，稍后再问"） |
+
+**推荐流程**：
+
+```sh
+# ① 先干跑，看清脚本要做什么（不落盘）
+DRY_RUN=1 sh /root/campus-onekey.sh 学号 密码
+
+# ② 只试认证（不动伪装配置、不装启动项），确认接口对了再往下
+/root/campus-onekey.sh --auth
+/root/campus-onekey.sh --status
+
+# ③ 认证通了，再跑全流程（伪装 + 认证 + 启动项）
+sh /root/campus-onekey.sh 学号 密码
+```
+
+> **抓包与通用版**：换学校、或者门户接口与上面差别很大时，去看
+> [`Login-edu`](https://github.com/2476818641/Login-edu) 的 **`main` 分支** ——
+> 那里有通用版脚本、抓包流程、以及"把抓到的接口喂给 AI 让它改脚本"的提示词。
+> 本仓库固件里带的 `school-onekey` 版本只服务本校。
+
 ### 验证（30 秒）
 
 ```sh
