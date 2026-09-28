@@ -183,3 +183,16 @@ easytier-cli route      # 子网代理网段
 - 固件内**不包含**任何账号、密码、房间密钥；相关配置由脚本交互式写入 `/etc/config`
 - 涉及多设备与大带宽使用时请遵守学校网络管理规定
 - 固件里的脚本是**快照**：想用最新版就在路由器上 `wget` 覆盖，或重新编译
+
+---
+
+## 六、许可证与第三方组件
+
+本仓库（配方、脚本、文档）以 **GPL-3.0-only** 发布，全文见 [`LICENSE.md`](LICENSE.md)。
+
+**为什么是 GPL-3.0**：仓库内以源码形式分发了 [UA-Mask](https://github.com/Zesuy/UA-Mask)（GPL-3.0-only），
+采用同一许可最省事、也避免授权冲突。第三方组件（EasyTier / athena-led / OpenClash / AdGuard Home 等）
+各自保留原许可，完整清单见 [`THIRD-PARTY.md`](THIRD-PARTY.md)。
+
+> 想给本仓库换更宽松的许可（例如 MIT）也可以，但需要保证 vendored 组件的许可声明继续保留在
+> `THIRD-PARTY.md` 中，且不与 GPL-3.0 冲突。
