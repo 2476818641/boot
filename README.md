@@ -193,6 +193,3 @@ easytier-cli route      # 子网代理网段
 **为什么是 GPL-3.0**：仓库内以源码形式分发了 [UA-Mask](https://github.com/Zesuy/UA-Mask)（GPL-3.0-only），
 采用同一许可最省事、也避免授权冲突。第三方组件（EasyTier / athena-led / OpenClash / AdGuard Home 等）
 各自保留原许可，完整清单见 [`THIRD-PARTY.md`](THIRD-PARTY.md)。
-
-> 想给本仓库换更宽松的许可（例如 MIT）也可以，但需要保证 vendored 组件的许可声明继续保留在
-> `THIRD-PARTY.md` 中，且不与 GPL-3.0 冲突。
