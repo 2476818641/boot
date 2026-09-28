@@ -116,7 +116,7 @@ sh /root/campus-onekey.sh 你的学号 你的密码
 
 | 参数 | 本校值（示例） | 你该怎么找到自己学校的值 |
 |---|---|---|
-| `PORTAL` | `http://10.30.100.5` | 未认证时浏览器被跳转到哪里（门户地址，可能是 IP 也可能是域名） |
+| `PORTAL` | `http://<门户地址>`（本校是一个 10.30.x.x 的私网地址） | 未认证时浏览器被跳转到哪里（门户地址，可能是 IP 也可能是域名） |
 | `PRE_GET` / `PRE_PATHS` | `1` / `/api/ip.php` | 登录前是否要先 GET 首页拿会话 cookie，以及前置接口叫什么 |
 | `API_PATHS` | `/api/login.php,/api/stat.php,/api/ack_auth.php` | F12 → 网络面板，点一次登录，看依次发出哪些请求 |
 | `EXTRA_FIELDS` | `authmode=0&pool=&isp_id=0&pxyacct=` | 登录请求里那些固定不变的附加字段 |
