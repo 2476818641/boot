@@ -8,15 +8,26 @@
 #   ② 问房间名与密钥（= Astral 房间 ID 与密码，源码里就是 NetworkIdentity::new(房间名, 密码)）
 #   ③ 问要把哪些端口转发给内网的哪台机器（今天 MC 明天别的游戏，跑一次改一次）
 #   ④ 顺手把内网路由下发（DHCP option 121）、UA-Mask 豁免 EasyTier 端口
+#   ⑤ 生成 /etc/easytier/config.toml 并把 uci 的 etcmd 钉成 config（真正让它生效的那步，见下）
 #
 # 用法：
 #   sh easytier-onekey.sh                     # 全流程（节点 → 房间 → 端口）
 #   sh easytier-onekey.sh --ports             # ★只改转发端口（最常用）
 #   sh easytier-onekey.sh --ports tcp/25565,udp/19132    # 免交互直接改
 #   sh easytier-onekey.sh --node              # 只改中转/引导节点
-#   sh easytier-onekey.sh --show              # 看现状（配置 / 转发 / 对端）
+#   sh easytier-onekey.sh --show              # 看现状（模式 / 配置 / 转发 / 对端 / 实际启动参数）
+#   sh easytier-onekey.sh --toml              # 手改过 config.toml 后：校验 + 重启
 #   sh easytier-onekey.sh --clear             # 清空全部端口转发
 #   DRY_RUN=1 sh easytier-onekey.sh --ports tcp/25565    # 只打印要改什么
+#
+# ★ 配置是怎么生效的（换机器 / 重刷固件后必看）
+#   luci-app-easytier 的 /etc/init.d/easytier 按 uci 的 etcmd 三选一：
+#     etcmd=config → easytier-core -c /etc/easytier/config.toml   ← 本脚本用这条
+#     etcmd=etcmd  → 把 uci 字段拼成 --network-name / -p / -n ... 命令行（LuCI 里叫"默认"）
+#     etcmd 为空   → 两条分支都不进，进程照样起来但**一个参数都没有**：
+#                    tun0 不创建、房间不进、easytier-cli 里 ipv4 空白、日志没有"开始运行"。
+#   所以本脚本同时写 uci（给 LuCI / --show 看）和 config.toml（真正生效的那份），
+#   并把 etcmd 钉成 config。旧版本只写 uci 且没写 etcmd —— 在全新刷机的机器上必然踩空。
 #
 # 端口写法（多个用逗号或空格分隔）：
 #   25565            等价 tcp/25565
@@ -38,6 +49,7 @@ set -u
 
 CONF_DIR=/etc/easytier
 CONF="$CONF_DIR/forwards.conf"
+TOML="$CONF_DIR/config.toml"          # etcmd=config 模式下真正被读取的配置
 NFT_FILE=/etc/nftables.d/20-easytier-dnat.nft
 UA_BYPASS_DEFAULT='22 443 11010-11013'
 UA_INIT="${UA_INIT:-/etc/init.d/UAmask}"   # 可覆盖（仅测试用）
@@ -51,6 +63,8 @@ say()  { printf '\033[32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[!]\033[0m %s\n' "$*" >&2; }
 info() { printf '    %s\n' "$*"; }
 die()  { printf '\033[31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
+# 缺项：正常路径直接退出；DRY_RUN 时只提示（预演本来就不落盘，别被自己的校验拦住）
+miss() { [ "$DRY_RUN" = 1 ] && { warn "$1（dry-run 按当前 uci 预览）"; return 0; }; die "$1"; }
 has()  { command -v "$1" >/dev/null 2>&1; }
 
 # 统一出口：DRY_RUN 时只打印
@@ -113,6 +127,137 @@ ask_yn() {
 	ask "$1 (y/n)" "$2"
 	a="$(printf '%s' "$REPLY" | tr 'A-Z' 'a-z')"
 	[ "$a" = y ] || [ "$a" = yes ]
+}
+
+# ──────────────────────────────────── 生成配置文件（真正生效的那份）
+# 两个坑，都实测踩过：
+#  1) uci 的 etcmd 不写 → init 两条分支都不进，easytier-core 起成一条没参数的命令行；
+#  2) TOML 里 ipv4 / hostname / dhcp / listeners 是**顶层**字段，dev_name / mtu 才在
+#     [flags] 里。位置写错 EasyTier 不报错（flags 是白名单式合并，不认识的 key 直接丢），
+#     `--check-config` 也只校验语法 —— 现象是"能启动，但节点没有虚拟 IP"。
+valid_ipv4() {
+	local a b c d rest o
+	IFS=. read -r a b c d rest <<EOF
+$1
+EOF
+	[ -z "${rest:-}" ] || return 1
+	for o in "$a" "$b" "$c" "$d"; do
+		case "$o" in ''|*[!0-9]*) return 1 ;; esac
+		[ "$o" -le 255 ] || return 1
+	done
+	return 0
+}
+
+toml_body() {   # 只往 stdout 写文件内容；要提示人一律用 warn（走 stderr，别污染 $(...)）
+	local name secret ip tun peers proxy iid np
+	name="$(et_get network_name)"
+	secret="$(et_get network_secret)"
+	ip="$(et_get ipaddr)"; ip="${ip%%/*}"
+	tun="$(tun_dev)"
+	peers="$(uci -q get easytier.@easytier[0].peeradd 2>/dev/null)"
+	proxy="$(uci -q get easytier.@easytier[0].proxy_network 2>/dev/null)"
+	# instance_id 沿用旧文件里的，节点身份稳定一点（没有就现生成一个）
+	iid="$(sed -n 's/^instance_id *= *"\(.*\)"$/\1/p' "$TOML" 2>/dev/null | head -1)"
+	[ -n "$iid" ] || iid="$(cat /proc/sys/kernel/random/uuid 2>/dev/null)"
+
+	cat <<EOF
+# 由 easytier-onekey.sh 自动生成 —— 要改请改 uci 后跑 --room / --node 重新生成，
+# 或直接改这里再跑 --toml（会校验语法并重启）。
+instance_name = "default"
+EOF
+	[ -n "$iid" ] && printf 'instance_id = "%s"\n' "$iid"
+	cat <<EOF
+dhcp = false
+ipv4 = "$ip"
+listeners = [
+    "tcp://0.0.0.0:11010",
+    "udp://0.0.0.0:11010",
+    "ws://0.0.0.0:11011",
+    "wss://0.0.0.0:11012",
+    "wg://0.0.0.0:11011",
+    "quic://0.0.0.0:11012",
+]
+
+[network_identity]
+network_name = "$name"
+network_secret = "$secret"
+EOF
+	if [ -n "$peers" ]; then
+		for np in $peers; do
+			np="$(norm_peer "$np")" || { warn "跳过看不懂的引导节点：$np"; continue; }
+			printf '\n[[peer]]\nuri = "%s"\n' "$np"
+		done
+	else
+		warn "没有任何引导节点 —— 房间里的设备互相发现不了（跑 --node 加一个）"
+	fi
+	case "$proxy" in
+		'') warn "没有子网代理网段 —— 房间里的其他设备访问不到本机内网" ;;
+		*)  for np in $proxy; do printf '\n[[proxy_network]]\ncidr = "%s"\n' "$np"; done ;;
+	esac
+	cat <<EOF
+
+[flags]
+# dev_name：init 从下面这行 grep 出网卡名，用来绑 network.EasyTier 与防火墙 zone
+dev_name = "$tun"
+mtu = 1380
+EOF
+}
+
+need_config() {   # 在子 shell 外调用，缺项直接 die（放 $(...) 里只会杀掉子 shell）
+	local name ip lan_pre
+	name="$(et_get network_name)"
+	ip="$(et_get ipaddr)"; ip="${ip%%/*}"
+	[ -n "$name" ] || miss "还没设房间名（network_name）—— 先跑：sh $0 --room"
+	[ -n "$(et_get network_secret)" ] || miss "还没设房间密钥（network_secret）—— 先跑：sh $0 --room"
+	valid_ipv4 "$ip" || miss "虚拟 IPv4 不合法：'$(et_get ipaddr)'（去掉 /24 之类的后缀；先跑：sh $0 --room）"
+	lan_pre="$(lan_ip)"; lan_pre="${lan_pre%.*}"
+	case "$ip" in
+		"$lan_pre".*) warn "虚拟 IP $ip 与本机 LAN（$lan_pre.0/24）同网段 —— 路由会打架，建议换成 10.10.10.1 这种" ;;
+	esac
+}
+
+toml_write() {   # 生成 → 校验 → 落盘 → 钉住 etcmd（不重启，重启由调用方决定）
+	local body tmp=/tmp/.et-config.toml
+	need_config
+	# 一个引导节点都没有的话，房间里的设备互相发现不了（只能等别人来连）。
+	# 兜底用官方公共节点：它只负责牵线，数据仍然 P2P/走房间内其他节点。
+	if [ -z "$(uci -q get easytier.@easytier[0].peeradd 2>/dev/null)" ]; then
+		warn "没有引导节点，兜底用 tcp://public.easytier.top:11010（想换成自建/朋友的跑 --node）"
+		et_list peeradd 'tcp://public.easytier.top:11010'
+		et_set external_node 'tcp://public.easytier.top:11010'
+	fi
+	body="$(toml_body)"
+	[ -n "$body" ] || die "生成的配置是空的，已放弃写入"
+	if [ "$DRY_RUN" = 1 ]; then
+		printf '    [dry-run] 写 %s：\n' "$TOML"
+		printf '%s\n' "$body" | sed 's/^/      | /'
+		return 0
+	fi
+	mkdir -p "$CONF_DIR"
+	printf '%s\n' "$body" > "$tmp"
+	# 安全网：语法错了就别装上去，否则 tun 不创建，还得回头翻日志
+	if has easytier-core; then
+		if ! easytier-core --check-config --config-file "$tmp" >/tmp/.et-check.log 2>&1; then
+			rm -f "$tmp"
+			die "生成的 config.toml 过不了 easytier-core --check-config：
+$(sed 's/^/      /' /tmp/.et-check.log)"
+		fi
+	fi
+	[ -f "$TOML" ] && cp -f "$TOML" "$TOML.bak"
+	cat "$tmp" > "$TOML"; rm -f "$tmp"
+	info "已写入 $TOML（旧文件备份为 $TOML.bak）"
+
+	# ★ 下面这几行是"能不能生效"的关键，别删
+	et_set etcmd 'config'              # 空着 → init 用一条没有参数的命令行启动 easytier-core
+	et_set enabled '1'
+	et_set interface_netmask '255.255.255.0'   # 别留 /8：会与 LAN / 对端子网代理前缀撞车
+	# 顺手把"默认(etcmd)"分支缺的字段补上：那边会把空值拼成 `--default-protocol`（缺参数，
+	# clap 直接报错退出）或 `--no-listener`，人在 LuCI 里切过去就会踩空
+	et_set listenermode 'ON'
+	et_set default_protocol '-'
+	et_set rpc_portal '15888'
+	run uci commit easytier
+	run /etc/init.d/easytier enable
 }
 
 # ──────────────────────────────────── 端口规则解析
@@ -269,6 +414,12 @@ do_node() {
 	et_set external_node "$(printf '%s' "$list" | awk '{print $1}')"
 	run uci commit easytier
 	info "已设置：$list"
+	# 房间已配好时顺手把实际生效的 config.toml 一起刷新；只改了节点不动它（等 --room 一起写）
+	if [ -n "$(et_get network_name)" ] && [ -n "$(et_get ipaddr)" ]; then
+		toml_write
+	else
+		info "房间还没配，等 ② 一起写进 $TOML"
+	fi
 }
 
 do_room() {
@@ -290,25 +441,32 @@ do_room() {
 		tries=$((tries + 1))
 		[ "$tries" -ge 3 ] && { warn "      已连续 3 次有问题，先按你填的继续（可随时用 --room 再改）"; break; }
 	done
-	ask "本机虚拟 IPv4" "$(et_get ipaddr)"
+	ask "本机虚拟 IPv4" "$(et_get ipaddr | sed 's#/.*##' | grep . || echo 192.168.10.1)"
 	local ip="$REPLY"
-	ask "要导出给房间的内网网段（子网代理，留空＝不导出）" "$(et_get proxy_network)"
-	local proxy="$REPLY"
+	local defproxy proxy lan_net
+	lan_net="$(lan_ip)"; lan_net="${lan_net%.*}.0/24"
+	defproxy="$(et_get proxy_network | awk '{print $1}')"
+	[ -n "$defproxy" ] || defproxy="$lan_net"
+	ask "要导出给房间的内网网段（子网代理，留空＝不导出）" "$defproxy"
+	proxy="$REPLY"
 	[ -n "$name" ] && et_set network_name "$name"
 	[ -n "$secret" ] && et_set network_secret "$secret"
-	[ -n "$ip" ] && et_set ipaddr "$ip"
+	[ -n "$ip" ] && et_set ipaddr "${ip%%/*}"
 	et_set ip_dhcp '0'
 	et_set interface_netmask '255.255.255.0'   # 别用 /8：会与 LAN / 对端子网代理前缀撞车
 	et_set enabled '1'
 	if [ -n "$proxy" ]; then et_list proxy_network "$proxy"; else et_list proxy_network; fi
 	run uci commit easytier
-	run /etc/init.d/easytier enable
+	# uci 只是给人看的副本，config.toml 才是 init 真正读的那份 —— 必须一起写
+	toml_write
 }
 
 do_ports() {
 	say "③ 端口转发（外部 → 内网机器）"
 	load_conf
 	local defip="$FWD_LANIP"
+	# 清单文件是文本，可能被手改坏 —— 别把一个不像 IP 的东西当默认值再传下去
+	valid_ipv4 "$defip" || defip=''
 	[ -n "$defip" ] || defip='192.168.1.5'
 
 	if [ -n "${1:-}" ]; then
@@ -382,18 +540,28 @@ restart_et() {
 	/etc/init.d/easytier restart >/dev/null 2>&1
 	sleep 8
 	say "⑤ 验证"
-	local p="$(first_peer)"
-	info "启动命令行："
-	grep '运行 /usr/bin/easytier-core' /tmp/easytier.log 2>/dev/null | tail -1 | sed 's/^/      /'
+	local pid cmdline
+	# ★ 看进程的**真实参数**，别看日志有没有"开始运行"那一行：
+	#   uci 的 etcmd 为空时 init 照样把进程拉起来，只是参数一个都没有，
+	#   现象是"进程在、15888 在监听、easytier-cli 能回话，但 tun0 不存在"。
+	pid="$(pidof easytier-core 2>/dev/null)"
+	if [ -n "$pid" ]; then
+		cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
+		info "实际启动参数（pid $pid）：$cmdline"
+	else
+		cmdline=''
+		warn "easytier-core 没在跑（/etc/init.d/easytier status 看下）"
+	fi
+	case "$cmdline" in
+		*"-c $TOML"*) info "配置文件已生效（命令行带 -c $TOML）✓" ;;
+		*"--network-name"*) info "uci 方式生效（命令行带 --network-name）✓" ;;
+		*) warn "命令行里既没有 -c $TOML 也没有 --network-name —— 房间/密钥根本没被读取！
+      修：sh $0 --room（本脚本会把 uci 的 etcmd 钉成 config 并生成 $TOML）" ;;
+	esac
 	info "对端列表（tunnel 列 = udp 即 P2P 直连）："
 	has easytier-cli && easytier-cli peer 2>/dev/null | sed 's/^/      /'
 	info "路由（应含子网代理网段）："
 	has easytier-cli && easytier-cli route 2>/dev/null | sed 's/^/      /'
-	if grep -q ' -p ' /tmp/easytier.log 2>/dev/null; then
-		info "引导节点已生效（命令行里有 -p）✓"
-	else
-		warn "命令行里没有 -p —— 检查 peeradd 是否用 add_list 写入（uci show easytier）"
-	fi
 
 	# 健康检查：tun 设备在不在。ipv4 列空白 + 没有 tun = 进程没带配置起来
 	if ! ip link show "$(tun_dev)" >/dev/null 2>&1; then
@@ -401,15 +569,34 @@ restart_et() {
 		info "本次日志最后 15 行："
 		tail -n 15 /tmp/easytier.log 2>/dev/null | sed 's/^/      /'
 		info "常见原因（按概率）："
-		info "  1) 引导节点地址不完整 —— 必须是 tcp://主机:端口（少了前缀或端口会解析失败）"
-		info "  2) 房间密钥填错 —— 与房间名混淆；密钥是 Astral 的『房间密码』"
-		info "  3) /etc/init.d/easytier 没有执行权限（ls -l 看是否为 755，不是就 chmod 0755）"
-		info "  4) 引导节点不可达 —— 可换 tcp://public.easytier.top:11010 验证"
+		info "  1) 启动参数里没有 -c（见上）—— uci 的 etcmd 不是 config"
+		info "  2) 引导节点地址不完整 —— 必须是 tcp://主机:端口（少了前缀或端口会解析失败）"
+		info "  3) 房间密钥填错 —— 与房间名混淆；密钥是 Astral 的『房间密码』"
+		info "  4) /etc/init.d/easytier 没有执行权限（ls -l 看是否为 755，不是就 chmod 0755）"
+		info "  5) 引导节点不可达 —— 可换 tcp://public.easytier.top:11010 验证"
 	fi
 }
 
 show_all() {
-	say "EasyTier 配置"
+	local etm pid cmdline
+	say "启动模式（uci etcmd）"
+	etm="$(et_get etcmd)"
+	case "$etm" in
+		config) info "config → 读 $TOML ✓" ;;
+		etcmd)  info "etcmd → 用 uci 字段拼命令行（LuCI 里叫『默认』）" ;;
+		'')     warn "空的！init 会用一条**没有参数**的命令行启动 easytier-core：
+      进程在、15888 在监听、easytier-cli 能回话，但 tun0 不存在、房间不进。
+      修：sh $0 --room（或 sh $0 --toml 重新生成配置）" ;;
+		*)      info "$etm（非标准值，init 只会走空参数分支）" ;;
+	esac
+	pid="$(pidof easytier-core 2>/dev/null)"
+	if [ -n "$pid" ]; then
+		cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
+		info "实际启动参数：$cmdline"
+	fi
+	say "配置文件（$TOML）"
+	[ -f "$TOML" ] && sed 's/^/    /' "$TOML" || info "（不存在 —— 跑 --room 生成）"
+	say "uci（给人看的副本，config 模式下不生效）"
 	uci show easytier 2>/dev/null | grep -vE "\.log_display=" | sed 's/^/    /'
 	say "转发清单（$CONF）"
 	[ -f "$CONF" ] && sed 's/^/    /' "$CONF" || info "（不存在）"
@@ -431,8 +618,9 @@ case "${1:-}" in
 	--node)  MODE=node;  shift ;;
 	--room)  MODE=room;  shift ;;
 	--show)  MODE=show;  shift ;;
+	--toml)  MODE=toml;  shift ;;
 	--clear) MODE=clear; shift ;;
-	-h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+	-h|--help) sed -n '2,47p' "$0"; exit 0 ;;
 	--*) die "未知参数：$1" ;;
 esac
 PORTS_ARG="${1:-}"
@@ -451,6 +639,7 @@ case "$MODE" in
 		;;
 	node)  do_node; restart_et; exit 0 ;;
 	room)  do_room; restart_et; exit 0 ;;
+	toml)  toml_write; restart_et; exit 0 ;;
 	ports) load_conf; do_ports "$PORTS_ARG"; do_common; exit 0 ;;
 	all)
 		load_conf
