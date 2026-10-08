@@ -417,6 +417,8 @@ do_node() {
 	# 房间已配好时顺手把实际生效的 config.toml 一起刷新；只改了节点不动它（等 --room 一起写）
 	if [ -n "$(et_get network_name)" ] && [ -n "$(et_get ipaddr)" ]; then
 		toml_write
+	elif [ -n "$(et_get network_name)" ]; then
+		warn "uci 里没有虚拟 IP（ipaddr）—— 跑 --room 补一个，脚本才能生成 $TOML"
 	else
 		info "房间还没配，等 ② 一起写进 $TOML"
 	fi

@@ -81,7 +81,7 @@
 | 固件内路径 | 用途 |
 |---|---|
 | `/etc/campus-onekey.sh` | 校园网：UA 伪装 + 门户认证 + 双向 TTL + 启动项（开机 / 网口 up / cron 每 5 分钟）。**门户接口按本校写死，换校需改「本校参数」** |
-| `/etc/easytier-onekey.sh` | 联机：EasyTier 配置 + 游戏端口转发 + 内网路由下发 |
+| `/etc/easytier-onekey.sh` | 联机：EasyTier 配置（生成 `/etc/easytier/config.toml` + 钉住 uci `etcmd`）+ 游戏端口转发 + 内网路由下发 |
 
 ---
 
@@ -149,6 +149,7 @@ sh /etc/easytier-onekey.sh --ports                          # 交互式
 # 换引导/中转节点、看现状、清空转发
 sh /etc/easytier-onekey.sh --node tcp://public.easytier.top:11010
 sh /etc/easytier-onekey.sh --show
+sh /etc/easytier-onekey.sh --toml        # 手改过 config.toml 后：校验 + 重启
 sh /etc/easytier-onekey.sh --clear
 ```
 
@@ -158,6 +159,16 @@ sh /etc/easytier-onekey.sh --clear
 easytier-cli peer       # 对端列表：tunnel=udp 即 P2P 直连
 easytier-cli route      # 子网代理网段
 ```
+
+> **配置到底放在哪（踩过坑，值得看一眼）**
+> `/etc/init.d/easytier` 按 uci `easytier.@easytier[0].etcmd` 三选一：
+> `config` → 读 `/etc/easytier/config.toml`；`etcmd` → 用 uci 字段拼命令行；
+> **空值 → 两条分支都不进**，进程照样起来但一个参数都没有 —— tun0 不创建、房间不进、
+> `easytier-cli peer` 里 ipv4 空白，而 `easytier-cli` 本身还能回话（很像"在跑"）。
+> `easytier-onekey.sh` 会同时写好 uci 与 `config.toml`，并把 `etcmd` 钉成 `config`；
+> 手工配的话记得 `uci set easytier.@easytier[0].etcmd=config && uci commit easytier`。
+> 另：`config.toml` 里 `ipv4` / `dhcp` / `listeners` 在**顶层**，`dev_name` / `mtu` 才在 `[flags]`，
+> 写错位置 EasyTier 会静默丢弃（`--check-config` 也不报错）。
 
 ### 5. 自己编译
 
