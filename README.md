@@ -138,8 +138,13 @@ DRY_RUN=1 /etc/campus-onekey.sh 学号 密码
 ### 4. 虚拟局域网与游戏联机
 
 ```sh
-# 首次：填房间名/密钥（= 对端虚拟局域网的房间号与密码）、本机虚拟 IP、子网代理
+# 首次最省事：直接粘对方的 Astral 分享链接（房间号/密码/服务器全自动读出来）
+sh /etc/easytier-onekey.sh --astral 'astral://room?code=H4sI…'
+# 也接受单独一串分享码（H4sI 开头）、甚至整段分享文本；不给参数就交互式粘贴
+
+# 或者手填：房间号与密码（= Astral 房间 ID 与密码）、本机虚拟 IP、子网代理
 sh /etc/easytier-onekey.sh --room
+# （--room 的第一个提问同样可以直接粘分享链接，后面就只剩虚拟 IP 和子网代理两个问题）
 
 # 最常用：改游戏端口转发（外部端口 → 内网机器）
 sh /etc/easytier-onekey.sh --ports tcp/25565,udp/19132
@@ -152,6 +157,10 @@ sh /etc/easytier-onekey.sh --show
 sh /etc/easytier-onekey.sh --toml        # 手改过 config.toml 后：校验 + 重启
 sh /etc/easytier-onekey.sh --clear
 ```
+
+> 分享码是 `base64url(gzip(json))`，解出来是房间名 / 房间号 / 密码 / 对方用的服务器列表，
+> 只用到 `base64` + `gzip`，路由器上不用另装东西。字段含义按 Astral 上游源码对齐
+> （`room_share_codec.dart` 的 `n/r/p/s`，以及 `simple.rs` 里的 `NetworkIdentity::new(房间号, 密码)`）。
 
 验证：
 

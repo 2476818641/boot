@@ -10,8 +10,16 @@
 #   ④ 顺手把内网路由下发（DHCP option 121）、UA-Mask 豁免 EasyTier 端口
 #   ⑤ 生成 /etc/easytier/config.toml 并把 uci 的 etcmd 钉成 config（真正让它生效的那步，见下）
 #
+# Astral 分享链接：
+#   对方在 Astral 里点"分享"给的链接（astral://room?code=…）可以直接喂给 --astral；
+#   跑 --room 时粘到第一个提问里也行 —— 房间号、房间密码、对方用的服务器全自动读出来。
+#   也接受只粘那串 H4sI 开头的分享码，甚至整段分享文本（会自动从里面叼出码）。
+#   分享码 = base64url(gzip(json))，解码只用 base64 + gzip，不装任何东西。
+#
 # 用法：
 #   sh easytier-onekey.sh                     # 全流程（节点 → 房间 → 端口）
+#   sh easytier-onekey.sh --astral 'astral://room?code=H4sI…'   # ★最省事：粘链接一键进房间
+#   sh easytier-onekey.sh --astral             # 不给参数就交互式粘贴
 #   sh easytier-onekey.sh --ports             # ★只改转发端口（最常用）
 #   sh easytier-onekey.sh --ports tcp/25565,udp/19132    # 免交互直接改
 #   sh easytier-onekey.sh --node              # 只改中转/引导节点
@@ -73,7 +81,7 @@ run() {
 }
 
 # 用法＝文件头那段注释（只有一个定义点，改行数时只改这里）
-usage() { sed -n '2,47p' "$0"; }
+usage() { sed -n '2,55p' "$0"; }
 # -h 不依赖 uci：在电脑 / 其它机器上也能读用法
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
 
@@ -89,7 +97,17 @@ et_list() {  # 清掉旧的再用 add_list —— init 只认 list 型，set 会
 	for v in "$@"; do [ -n "$v" ] && run uci add_list "easytier.@easytier[0].$key=$v"; done
 }
 lan_ip()  { uci -q get network.lan.ipaddr 2>/dev/null || echo 192.168.1.1; }
+lan_net() { local l; l="$(lan_ip)"; printf '%s.0/24' "${l%.*}"; }
 tun_dev() { local t; t="$(et_get tunname)"; [ -n "$t" ] && echo "$t" || echo tun0; }
+toml_ipv4() { [ -f "$TOML" ] && sed -n 's/^ipv4 *= *"\([^"]*\)".*/\1/p' "$TOML" 2>/dev/null | head -1; }
+# 本机虚拟 IP：uci 优先，其次现成的 config.toml（手工删过 uci 也别让人重填），最后给默认
+cur_ipaddr() {
+	local v
+	v="$(et_get ipaddr)"; v="${v%%/*}"
+	[ -n "$v" ] || v="$(toml_ipv4)"
+	[ -n "$v" ] || v='192.168.10.1'
+	printf '%s' "$v"
+}
 # 规范化引导节点地址：补协议前缀与端口。
 # 为什么必须做：EasyTier 的 -p 需要完整 URL，写成 "vs.example.com" 会解析失败、
 # 进程直接退出，现象是 easytier-cli 里 ipv4 列空白、"启动命令行"也打不出来（实测踩过）。
@@ -114,8 +132,10 @@ norm_peer() {
 
 first_peer() {
 	local p
-	p="$(uci -q get easytier.@easytier[0].peeradd 2>/dev/null | head -1)"
-	[ -n "$p" ] || p="$(et_get external_node)"
+	# 只取第一个：peeradd 是 uci list，多条时 `uci get` 会用空格拼成一整串，
+	# 而 norm_peer 会 tr -d 空格 —— 直接喂进去会粘成 "tcp://a:11010udp://b:11010"（实测踩过）
+	p="$(uci -q get easytier.@easytier[0].peeradd 2>/dev/null | awk '{print $1}')"
+	[ -n "$p" ] || p="$(et_get external_node | awk '{print $1}')"
 	[ -n "$p" ] || p="tcp://public.easytier.top:11010"
 	norm_peer "$p" || printf '%s' "$p"
 }
@@ -157,7 +177,7 @@ toml_body() {   # 只往 stdout 写文件内容；要提示人一律用 warn（�
 	local name secret ip tun peers proxy iid np
 	name="$(et_get network_name)"
 	secret="$(et_get network_secret)"
-	ip="$(et_get ipaddr)"; ip="${ip%%/*}"
+	ip="$(cur_ipaddr)"
 	tun="$(tun_dev)"
 	peers="$(uci -q get easytier.@easytier[0].peeradd 2>/dev/null)"
 	proxy="$(uci -q get easytier.@easytier[0].proxy_network 2>/dev/null)"
@@ -211,9 +231,9 @@ EOF
 need_config() {   # 在子 shell 外调用，缺项直接 die（放 $(...) 里只会杀掉子 shell）
 	local name ip lan_pre
 	name="$(et_get network_name)"
-	ip="$(et_get ipaddr)"; ip="${ip%%/*}"
-	[ -n "$name" ] || miss "还没设房间名（network_name）—— 先跑：sh $0 --room"
-	[ -n "$(et_get network_secret)" ] || miss "还没设房间密钥（network_secret）—— 先跑：sh $0 --room"
+	ip="$(cur_ipaddr)"
+	[ -n "$name" ] || miss "还没设房间名（network_name）—— 先跑：sh $0 --room 或 --astral 'astral://room?code=…'"
+	[ -n "$(et_get network_secret)" ] || miss "还没设房间密钥（network_secret）—— 先跑：sh $0 --room 或 --astral '…'"
 	valid_ipv4 "$ip" || miss "虚拟 IPv4 不合法：'$(et_get ipaddr)'（去掉 /24 之类的后缀；先跑：sh $0 --room）"
 	lan_pre="$(lan_ip)"; lan_pre="${lan_pre%.*}"
 	case "$ip" in
@@ -265,6 +285,149 @@ $(sed 's/^/      /' /tmp/.et-check.log)"
 	et_set rpc_portal '15888'
 	run uci commit easytier
 	run /etc/init.d/easytier enable
+}
+
+# ──────────────────────────────────── Astral 分享链接 / 分享码
+# 分享码 = base64url(gzip(json))，json 形如：
+#   {"n":"xyw","r":"618870","p":"773468","m":"","e":1,
+#    "s":["tcp://38.55.199.242","udp://38.55.199.242"],"c":"1791466192255"}
+# 字段含义按上游源码确认（github.com/ldoubil/astral）：
+#   lib/core/room/room_share_codec.dart → n 房间名 / r 房间号 / p 密码 / m 消息密钥 /
+#                                         e 是否加密房间 / s 该房间的服务器列表
+#   rust/src/api/simple.rs:536          → NetworkIdentity::new(room_name, room_password)
+# 即 r → network_name、p → network_secret（和"手机能进房间"的实测一致）。
+# 链接形如 astral://room?code=<分享码>；整段分享文本、单独一串分享码都认。
+ASTRA_NAME='' ASTRA_ID='' ASTRA_PASS='' ASTRA_SERVERS='' ASTRA_ENC=0
+
+# base64 补 '=' 到 4 的倍数（busybox 的 base64 -d 对长度挑剔）
+base64_pad() {
+	case $(( ${#1} % 4 )) in
+		0) printf '%s' "$1" ;;
+		2) printf '%s==' "$1" ;;
+		3) printf '%s=' "$1" ;;
+		*) return 1 ;;   # 余 1 不可能是合法 base64
+	esac
+}
+
+# 分享码 → json 文本。
+# 注意必须用管道直接把字节喂给 gzip：shell 变量存不住 NUL，先 $() 抓一遍会解压失败。
+astral_gunzip() {
+	local code
+	code="$(printf '%s' "$1" | tr -d ' \t\r\n')"
+	code="$(base64_pad "$code")" || return 1
+	if has gzip; then
+		printf '%s' "$code" | tr '_-' '/+' | base64 -d 2>/dev/null | gzip -dc 2>/dev/null
+	elif has zcat; then
+		printf '%s' "$code" | tr '_-' '/+' | base64 -d 2>/dev/null | zcat 2>/dev/null
+	else
+		return 1
+	fi
+}
+
+# 从"链接 / 整段分享文本 / 纯分享码"里把码抠出来
+astral_extract() {
+	local in="$1" code
+	# 浏览器复制来的链接可能把 + / = 转义了
+	in="$(printf '%s' "$in" | tr -d '\r' | sed -e 's/%3[dD]/=/g' -e 's/%2[bB]/+/g' -e 's#%2[fF]#/#g')"
+	case "$in" in
+		*code=*) code="${in#*code=}"; code="${code%%&*}" ;;
+		*)       code="$in" ;;
+	esac
+	# 只保留开头那段合法 base64 字符：整段分享文本的换行/说明文字会被切掉
+	code="$(printf '%s' "$code" | sed -n 's/^[[:space:]]*\([A-Za-z0-9_+/=-]*\).*/\1/p' | head -1)"
+	case "$code" in
+		H4sI*) : ;;   # gzip 魔数的 base64 前缀，正常
+		*)      code="$(printf '%s' "$in" | sed -n 's/.*\(H4sI[A-Za-z0-9_+/=-]*\).*/\1/p' | head -1)" ;;
+	esac
+	printf '%s' "$code"
+}
+
+json_str() {   # json_str <key> <json> → 字符串值（键名唯一时可靠）
+	printf '%s' "$2" | sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+}
+json_arr() {   # json_arr <key> <json> → 数组里的各元素（空格分隔，去掉引号与逗号）
+	printf '%s' "$2" | sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' | head -1 | tr -d '"' | tr ',' ' '
+}
+
+is_astral_input() {   # 用户粘的东西像不像 Astral 链接/分享码（房间号那种纯数字不会被误判）
+	case "$1" in
+		*astral://*) return 0 ;;
+		*H4sI*)      return 0 ;;
+	esac
+	return 1
+}
+
+# 解析并落到 uci（房间号/密码/引导节点）。成功 0，失败 1（失败原因自己 warn 过了）
+astral_apply() {
+	local in="$1" code json one norm list=''
+	code="$(astral_extract "$in")"
+	[ -n "$code" ] || { warn "里面没找到分享码 —— 要 astral://room?code=… 或那串 H4sI 开头的码"; return 1; }
+	has base64 || { warn "系统里没有 base64 命令，解不了分享码（用 --room 手填房间号与密码）"; return 1; }
+	if ! has gzip && ! has zcat; then
+		warn "系统里没有 gzip/zcat，解不了分享码（apk add gzip；或用 --room 手填）"; return 1
+	fi
+	json="$(astral_gunzip "$code")"
+	if [ -z "$json" ]; then
+		warn "分享码解不开 —— 多半是复制时漏字或被聊天软件改过（实测踩过：一个字符错就全废）"
+		return 1
+	fi
+	ASTRA_NAME="$(json_str n "$json")"
+	ASTRA_ID="$(json_str r "$json")"
+	ASTRA_PASS="$(json_str p "$json")"
+	ASTRA_SERVERS="$(json_arr s "$json")"
+	case "$json" in *'"e":1'*) ASTRA_ENC=1 ;; *) ASTRA_ENC=0 ;; esac
+
+	info "分享码解出来："
+	info "  房间名：${ASTRA_NAME:-（空）}    （只是显示名，EasyTier 认的是房间号）"
+	info "  房间号：${ASTRA_ID:-（空）}  → network_name"
+	if [ -n "$ASTRA_PASS" ]; then
+		info "  房间密码：读到 ${#ASTRA_PASS} 位 → network_secret（不回显，--show 能看）"
+	else
+		info "  房间密码：（空）"
+	fi
+	[ "$ASTRA_ENC" = 1 ] && info "  类型：加密房间"
+	[ -n "$ASTRA_SERVERS" ] && info "  服务器：$ASTRA_SERVERS"
+	[ -n "$ASTRA_ID" ] || { warn "分享码里没有房间号 —— 让对方用『公开房间』重新分享一次"; return 1; }
+	[ -z "$ASTRA_PASS" ] && warn "分享码里没有房间密码 —— 对方若设了密码，连上也会被拒"
+
+	et_set network_name "$ASTRA_ID"
+	et_set network_secret "$ASTRA_PASS"
+	if [ -n "$ASTRA_SERVERS" ]; then
+		for one in $ASTRA_SERVERS; do
+			norm="$(norm_peer "$one")" || { warn "看不懂这个服务器地址，已跳过：$one"; continue; }
+			list="$list${list:+ }$norm"
+		done
+		if [ -n "$list" ]; then
+			et_list peeradd $list
+			et_set external_node "$(printf '%s' "$list" | awk '{print $1}')"
+			info "  引导节点已设为：$list"
+		fi
+	fi
+	et_set ip_dhcp '0'
+	run uci commit easytier
+	return 0
+}
+
+# --astral：一条命令进房间，全程不问人
+do_astral() {
+	say "① Astral 分享链接 → 房间配置"
+	local in="${1:-}" ip proxy
+	if [ -z "$in" ]; then
+		ask "粘贴 Astral 分享链接或分享码" ''
+		in="$REPLY"
+	fi
+	[ -n "$in" ] || die "没给链接也没粘码。用法：sh $0 --astral 'astral://room?code=…'"
+	astral_apply "$in" || die "分享链接/分享码没解析成功（原因见上）"
+
+	# 虚拟 IP 与子网代理沿用现状；uci 里缺了就补上（失败时退回 config.toml / 默认值）
+	ip="$(cur_ipaddr)"
+	et_set ipaddr "$ip"
+	proxy="$(uci -q get easytier.@easytier[0].proxy_network 2>/dev/null | awk '{print $1}')"
+	[ -n "$proxy" ] || proxy="$(lan_net)"
+	et_list proxy_network "$proxy"
+	info "本机虚拟 IP：$ip    子网代理：$proxy"
+	run uci commit easytier
+	toml_write
 }
 
 # ──────────────────────────────────── 端口规则解析
@@ -421,11 +584,9 @@ do_node() {
 	et_set external_node "$(printf '%s' "$list" | awk '{print $1}')"
 	run uci commit easytier
 	info "已设置：$list"
-	# 房间已配好时顺手把实际生效的 config.toml 一起刷新；只改了节点不动它（等 --room 一起写）
-	if [ -n "$(et_get network_name)" ] && [ -n "$(et_get ipaddr)" ]; then
+	# 房间已配好时顺手把实际生效的 config.toml 一起刷新；只改了节点就不动它（等 --room 一起写）
+	if [ -n "$(et_get network_name)" ]; then
 		toml_write
-	elif [ -n "$(et_get network_name)" ]; then
-		warn "uci 里没有虚拟 IP（ipaddr）—— 跑 --room 补一个，脚本才能生成 $TOML"
 	else
 		info "房间还没配，等 ② 一起写进 $TOML"
 	fi
@@ -433,31 +594,43 @@ do_node() {
 
 do_room() {
 	say "② 房间（与 Astral 房间 ID / 密码一致）"
-	ask "房间名/ID" "$(et_get network_name)"
-	local name="$REPLY"
-	local tries=0
-	while : ; do
-		ask "房间密钥" "$(et_get network_secret)"
-		secret="$REPLY"
-		case "$secret" in
-			''|mysecret|easytier-password)
-				warn "      密钥看起来是空的或界面的示例值 —— 必须填对端房间的真实密码" ;;
-			"$name")
-				warn "      ⚠️ 密钥与房间名相同（$name）—— 大概率是填串了。"
-				warn "         Astral 的『房间 ID』是 network_name、『房间密码』才是 network_secret，两者不同" ;;
-			*) break ;;
-		esac
-		tries=$((tries + 1))
-		[ "$tries" -ge 3 ] && { warn "      已连续 3 次有问题，先按你填的继续（可随时用 --room 再改）"; break; }
-	done
-	ask "本机虚拟 IPv4" "$(et_get ipaddr | sed 's#/.*##' | grep . || echo 192.168.10.1)"
+	ask "房间名/ID（也可以直接粘贴 Astral 分享链接 / 分享码）" "$(et_get network_name)"
+	local name="$REPLY" secret=''
+	if is_astral_input "$name"; then
+		# 粘了分享链接：房间号、密码、对方用的服务器一次全配好，后面只问虚拟 IP 与子网代理
+		say "识别到 Astral 分享链接，自动读取房间信息"
+		astral_apply "$name" || die "分享链接没解析成功（原因见上）；想手填就重新跑 --room 并输入房间号"
+		name="$(et_get network_name)"; secret="$(et_get network_secret)"
+	else
+		local tries=0
+		while : ; do
+			ask "房间密钥" "$(et_get network_secret)"
+			secret="$REPLY"
+			case "$secret" in
+				''|mysecret|easytier-password)
+					warn "      密钥看起来是空的或界面的示例值 —— 必须填对端房间的真实密码" ;;
+				"$name")
+					warn "      ⚠️ 密钥与房间名相同（$name）—— 大概率是填串了。"
+					warn "         Astral 的『房间 ID』是 network_name、『房间密码』才是 network_secret，两者不同" ;;
+				*) break ;;
+			esac
+			tries=$((tries + 1))
+			[ "$tries" -ge 3 ] && { warn "      已连续 3 次有问题，先按你填的继续（可随时用 --room 再改）"; break; }
+		done
+	fi
+	ask "本机虚拟 IPv4" "$(cur_ipaddr)"
 	local ip="$REPLY"
-	local defproxy proxy lan_net
-	lan_net="$(lan_ip)"; lan_net="${lan_net%.*}.0/24"
+	local defproxy proxy lnet
+	lnet="$(lan_net)"
 	defproxy="$(et_get proxy_network | awk '{print $1}')"
-	[ -n "$defproxy" ] || defproxy="$lan_net"
+	[ -n "$defproxy" ] || defproxy="$lnet"
 	ask "要导出给房间的内网网段（子网代理，留空＝不导出）" "$defproxy"
 	proxy="$REPLY"
+	# 明显不是网段的先拦下（真塞进 TOML 会被 EasyTier 的 --check-config 拦住，但那个报错不好懂）
+	case "$proxy" in
+		'') : ;;
+		*[!0-9./[:space:]]*) warn "子网代理长得不像网段（形如 192.168.1.0/24），已忽略：$proxy"; proxy='' ;;
+	esac
 	[ -n "$name" ] && et_set network_name "$name"
 	[ -n "$secret" ] && et_set network_secret "$secret"
 	[ -n "$ip" ] && et_set ipaddr "${ip%%/*}"
@@ -626,13 +799,14 @@ case "${1:-}" in
 	--ports) MODE=ports; shift ;;
 	--node)  MODE=node;  shift ;;
 	--room)  MODE=room;  shift ;;
+	--astral) MODE=astral; shift ;;
 	--show)  MODE=show;  shift ;;
 	--toml)  MODE=toml;  shift ;;
 	--clear) MODE=clear; shift ;;
 	-h|--help) usage; exit 0 ;;
 	--*) die "未知参数：$1" ;;
 esac
-PORTS_ARG="${1:-}"
+ARG1="${1:-}"
 [ $# -gt 0 ] && shift
 
 has nft || warn "没有 nft 命令，转发规则不会生效"
@@ -646,15 +820,16 @@ case "$MODE" in
 		warn "已清空所有端口转发"
 		exit 0
 		;;
-	node)  do_node; restart_et; exit 0 ;;
-	room)  do_room; restart_et; exit 0 ;;
-	toml)  toml_write; restart_et; exit 0 ;;
-	ports) load_conf; do_ports "$PORTS_ARG"; do_common; exit 0 ;;
+	node)   do_node "$ARG1"; restart_et; exit 0 ;;
+	room)   do_room; restart_et; exit 0 ;;
+	astral) do_astral "$ARG1"; restart_et; exit 0 ;;
+	toml)   toml_write; restart_et; exit 0 ;;
+	ports)  load_conf; do_ports "$ARG1"; do_common; exit 0 ;;
 	all)
 		load_conf
 		do_node
 		do_room
-		do_ports "$PORTS_ARG"
+		do_ports "$ARG1"
 		do_common
 		restart_et
 		info "以后改端口只需：sh $0 --ports"
