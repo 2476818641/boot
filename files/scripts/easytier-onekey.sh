@@ -71,12 +71,34 @@ et_list() {  # 清掉旧的再用 add_list —— init 只认 list 型，set 会
 }
 lan_ip()  { uci -q get network.lan.ipaddr 2>/dev/null || echo 192.168.1.1; }
 tun_dev() { local t; t="$(et_get tunname)"; [ -n "$t" ] && echo "$t" || echo tun0; }
+# 规范化引导节点地址：补协议前缀与端口。
+# 为什么必须做：EasyTier 的 -p 需要完整 URL，写成 "vs.example.com" 会解析失败、
+# 进程直接退出，现象是 easytier-cli 里 ipv4 列空白、"启动命令行"也打不出来（实测踩过）。
+norm_peer() {
+	local u="$1"
+	u="$(printf '%s' "$u" | tr -d ' \t')"
+	[ -n "$u" ] || return 1
+	case "$u" in
+		*://*) : ;;
+		*)     u="tcp://$u" ;;
+	esac
+	# 取 :// 之后的部分，看有没有端口（含 IPv6 方括号的情况一并照顾）
+	local rest="${u#*://}" host part
+	case "$rest" in
+		\[*\]:*) : ;;                                  # [v6]:port
+		\[*\])   u="$u:11010" ;;                        # [v6]
+		*:*) : ;;                                        # host:port
+		*)     u="$u:11010" ;;                           # host → 补默认端口
+	esac
+	printf '%s' "$u"
+}
+
 first_peer() {
 	local p
 	p="$(uci -q get easytier.@easytier[0].peeradd 2>/dev/null | head -1)"
 	[ -n "$p" ] || p="$(et_get external_node)"
 	[ -n "$p" ] || p="tcp://public.easytier.top:11010"
-	printf '%s' "$p"
+	norm_peer "$p" || printf '%s' "$p"
 }
 
 ask() {  # ask "提示" "默认值" → 结果在 REPLY
@@ -235,8 +257,14 @@ do_node() {
 		nodes="$REPLY"
 	fi
 	[ -n "$nodes" ] || { warn "跳过"; return 0; }
-	local list
-	list="$(printf '%s' "$nodes" | tr ',' ' ')"
+	# 逐个规范化（补 tcp:// 与 :11010），避免写成 "host" 让进程起不来
+	local list='' one norm
+	for one in $(printf '%s' "$nodes" | tr ',' ' '); do
+		norm="$(norm_peer "$one")" || { warn "看不懂这个节点地址，已跳过：$one"; continue; }
+		[ "$norm" != "$one" ] && info "已补全地址：$one → $norm"
+		list="$list${list:+ }$norm"
+	done
+	[ -n "$list" ] || { warn "没有可用的节点地址"; return 0; }
 	et_list peeradd $list
 	et_set external_node "$(printf '%s' "$list" | awk '{print $1}')"
 	run uci commit easytier
@@ -247,8 +275,21 @@ do_room() {
 	say "② 房间（与 Astral 房间 ID / 密码一致）"
 	ask "房间名/ID" "$(et_get network_name)"
 	local name="$REPLY"
-	ask "房间密钥" "$(et_get network_secret)"
-	local secret="$REPLY"
+	local tries=0
+	while : ; do
+		ask "房间密钥" "$(et_get network_secret)"
+		secret="$REPLY"
+		case "$secret" in
+			''|mysecret|easytier-password)
+				warn "      密钥看起来是空的或界面的示例值 —— 必须填对端房间的真实密码" ;;
+			"$name")
+				warn "      ⚠️ 密钥与房间名相同（$name）—— 大概率是填串了。"
+				warn "         Astral 的『房间 ID』是 network_name、『房间密码』才是 network_secret，两者不同" ;;
+			*) break ;;
+		esac
+		tries=$((tries + 1))
+		[ "$tries" -ge 3 ] && { warn "      已连续 3 次有问题，先按你填的继续（可随时用 --room 再改）"; break; }
+	done
 	ask "本机虚拟 IPv4" "$(et_get ipaddr)"
 	local ip="$REPLY"
 	ask "要导出给房间的内网网段（子网代理，留空＝不导出）" "$(et_get proxy_network)"
@@ -352,6 +393,18 @@ restart_et() {
 		info "引导节点已生效（命令行里有 -p）✓"
 	else
 		warn "命令行里没有 -p —— 检查 peeradd 是否用 add_list 写入（uci show easytier）"
+	fi
+
+	# 健康检查：tun 设备在不在。ipv4 列空白 + 没有 tun = 进程没带配置起来
+	if ! ip link show "$(tun_dev)" >/dev/null 2>&1; then
+		warn "没找到 tun 设备（$(tun_dev)）—— 守护进程很可能没起来"
+		info "本次日志最后 15 行："
+		tail -n 15 /tmp/easytier.log 2>/dev/null | sed 's/^/      /'
+		info "常见原因（按概率）："
+		info "  1) 引导节点地址不完整 —— 必须是 tcp://主机:端口（少了前缀或端口会解析失败）"
+		info "  2) 房间密钥填错 —— 与房间名混淆；密钥是 Astral 的『房间密码』"
+		info "  3) /etc/init.d/easytier 没有执行权限（ls -l 看是否为 755，不是就 chmod 0755）"
+		info "  4) 引导节点不可达 —— 可换 tcp://public.easytier.top:11010 验证"
 	fi
 }
 
