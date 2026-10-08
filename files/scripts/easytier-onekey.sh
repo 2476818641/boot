@@ -72,6 +72,11 @@ run() {
 	if [ "$DRY_RUN" = 1 ]; then printf '    [dry-run] %s\n' "$*"; else "$@"; fi
 }
 
+# 用法＝文件头那段注释（只有一个定义点，改行数时只改这里）
+usage() { sed -n '2,47p' "$0"; }
+# -h 不依赖 uci：在电脑 / 其它机器上也能读用法
+case "${1:-}" in -h|--help) usage; exit 0 ;; esac
+
 has uci || die "找不到 uci —— 这脚本要在 OpenWrt 路由器上跑"
 
 # ──────────────────────────────────── 读取现状
@@ -624,7 +629,7 @@ case "${1:-}" in
 	--show)  MODE=show;  shift ;;
 	--toml)  MODE=toml;  shift ;;
 	--clear) MODE=clear; shift ;;
-	-h|--help) sed -n '2,47p' "$0"; exit 0 ;;
+	-h|--help) usage; exit 0 ;;
 	--*) die "未知参数：$1" ;;
 esac
 PORTS_ARG="${1:-}"
