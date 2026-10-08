@@ -245,6 +245,8 @@ $(sed 's/^/      /' /tmp/.et-check.log)"
 	fi
 	[ -f "$TOML" ] && cp -f "$TOML" "$TOML.bak"
 	cat "$tmp" > "$TOML"; rm -f "$tmp"
+	# 里面有房间密钥 —— 别让全机可读（init / easytier-core / LuCI 都以 root 读，不影响）
+	chmod 600 "$TOML"
 	info "已写入 $TOML（旧文件备份为 $TOML.bak）"
 
 	# ★ 下面这几行是"能不能生效"的关键，别删
