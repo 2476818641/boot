@@ -27,6 +27,7 @@
 #   sh campus-onekey.sh                      # 交互式问账号密码
 #   sh campus-onekey.sh --status             # 状态：外网通不通、启动项装没装、伪装开着没
 #   sh campus-onekey.sh --auth               # 只认证（不动伪装配置、不装启动项）
+#   sh campus-onekey.sh --install            # 只装启动项（开机 / 网口上线 / cron 每 5 分钟）
 #   sh campus-onekey.sh --ttl                # 只刷新 TTL 规则（补齐入站 TCP/UDP 修复）
 #   sh campus-onekey.sh --auto               # 给 cron/hotplug/init.d 用：静默，只认证
 #   sh campus-onekey.sh --dns-fallback       # 应急：AdGuardHome 挂了导致全屋解析不了域名时，把 dnsmasq 指回公网 DNS
@@ -78,6 +79,8 @@ QUIET="${QUIET:-0}"
 SKIP_DISGUISE="${SKIP_DISGUISE:-0}"
 # --auto（开机/热插拔/cron）发现时钟偏差 >300s 时是否自动按门户校时。1=校（默认），0=只记日志
 CLOCK_AUTO="${CLOCK_AUTO:-1}"
+# do_login 用：1=被门户明确拒绝（账号密码错等）→ 调用方别去装"每 5 分钟重试"的启动项
+AUTH_FATAL=0
 UA_STR="${UA_STR:-}"
 UA_MODE="${UA_MODE:-regex}"				# regex（正表，推荐）/ all（全量）
 UA_WHITELIST="${UA_WHITELIST:-}"
@@ -470,6 +473,7 @@ do_login() {
 			if [ "$STEP" = 1 ] && [ "$RET" = 4 ]; then
 				warn "    账号或密码不正确（ret=4 msg=$MSG）"
 				log "auth rejected: ret=4 (bad credentials, user=$CAMPUS_USER)"
+				AUTH_FATAL=1
 				return 1
 			fi
 			if ret_in "$RET" "$RET_RETRY" && [ "$_try" -lt "$RET_MAX_TRY" ]; then
@@ -478,6 +482,7 @@ do_login() {
 			fi
 			warn "    认证被拒绝：$_path ret=$RET msg=$MSG"
 			log "auth rejected at $_path: ret=$RET msg=$MSG"
+			AUTH_FATAL=1
 			return 1
 		done
 	done
@@ -564,6 +569,13 @@ install_autostart() {
 		echo "*/5 * * * * $SELF_INSTALL --auto >/dev/null 2>&1" >> "$CRONTAB_FILE"
 	[ -x /etc/init.d/cron ] && /etc/init.d/cron restart >/dev/null 2>&1
 	say "    $INITHOOK（开机）+ $HOOKFILE（网口上线）+ cron 每 5 分钟"
+}
+
+autostart_missing() {	# 三个启动项有缺就返回 0（用来判断"要不要补装"）
+	[ -x "$INITHOOK" ] || return 0
+	[ -x "$HOOKFILE" ] || return 0
+	grep -qF "$SELF_INSTALL --auto" "$CRONTAB_FILE" 2>/dev/null || return 0
+	return 1
 }
 
 uninstall_autostart() {
@@ -680,7 +692,7 @@ dns_set() {	# $1 = fallback | adgh
 
 show_status() {
 	local sk skabs
-	# 外网与 DNS 分开报：AGH 挂掉时前者仍是"通"，一眼就能看出问题在哪
+	# 四行分开报：这四种故障体感都是"上不了网"，但修法完全不同（见 §8.1）
 	printf '外网(按IP): '; if tcp_out; then echo "通 ✅（HTTP $TCP_CODE）"; else echo '不通 ❌'; fi
 	printf '域名解析 : '; if dns_ok; then echo '正常 ✅'; else echo '不通 ❌ → dnsmasq/AdGuardHome 挂了，可用 --dns-fallback 应急'; fi
 	printf '出站 443 : '; if https_out; then echo '通 ✅'; else echo '不通 ❌（HTTPS 全挂；门户/HTTP/DNS 照常，别误判成认证掉了）'; fi
@@ -700,8 +712,14 @@ show_status() {
 	printf '账号     : %s\n' "$(uget campus.main.user)"
 	printf '启动项   : init.d=%s hotplug=%s cron=%s\n' \
 		"$([ -x "$INITHOOK" ] && echo 有 || echo 无)" \
-		"$([ -f "$HOOKFILE" ] && echo 有 || echo 无)" \
+		"$([ -x "$HOOKFILE" ] && echo 有 || echo 无)" \
 		"$(grep -qF "$SELF_INSTALL --auto" "$CRONTAB_FILE" 2>/dev/null && echo 有 || echo 无)"
+	# 缺启动项是很隐蔽的坑：认证当时没成功就没装（旧版会直接 exit），于是重启/掉线后
+	# 没人再自动认证、也不会自动校时 —— 但 --status 之外你根本看不出来。
+	if autostart_missing; then
+		printf '           → ⚠️ 启动项不全：路由器重启/掉线后不会自动认证，也不会自动校时\n'
+		printf '             补装：sh %s --install\n' "$SELF_INSTALL"
+	fi
 	if [ -x /usr/bin/UAmask ] || [ -n "$(uget UAmask.enabled.enabled)" ]; then
 		printf 'UA-Mask  : 启用=%s 匹配=%s UA=%s\n' \
 			"$(uget UAmask.enabled.enabled)" "$(uget UAmask.main.match_mode)" "$(printf '%.40s' "$(uget UAmask.main.ua)")"
@@ -730,11 +748,12 @@ case "${1:-}" in
 --auth)      MODE="auth"; shift ;;
 --auto)      MODE="auto"; QUIET=1; shift ;;
 --ttl)       MODE="ttl"; shift ;;
+--install)   MODE="install"; shift ;;
 --dns-fallback) MODE="dnsfb"; shift ;;
 --dns-adgh)  MODE="dnsagh"; shift ;;
 --clock)     MODE="clock"; shift ;;
 --uninstall) MODE="uninstall"; shift ;;
---help|-h)   sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+--help|-h)   sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 --*)          die "未知参数：$1（试试 --help）" ;;
 esac
 # 账号密码的位置随用法而变：`… 账号 密码` 与 `… --auth 账号 密码` 都要能用
@@ -747,6 +766,7 @@ esac
 
 case "$MODE" in
 status)    show_status; exit 0 ;;
+install)   install_autostart; exit 0 ;;
 ttl)       info "只刷新 TTL 规则（不动 UA-Mask / 不认证）"; setup_ttl; exit 0 ;;
 dnsfb)     dns_set fallback; exit 0 ;;
 dnsagh)    dns_set adgh; exit 0 ;;
@@ -762,6 +782,12 @@ case "$PORTAL" in http://*|https://*) ;; *) die "门户地址看着不对：$POR
 case "$MODE" in
 auto)
 	# cron/hotplug/init.d 用：已经在线就不做事（幂等，静默）
+	# 启动项被删了、或从来没装上（旧版"认证没成功就 exit"会导致这种），先补回来 ——
+	# 否则掉线/重启后再没人自动认证，也不会自动校时。
+	if autostart_missing; then
+		log "检测到启动项缺失，自动补装"
+		install_autostart
+	fi
 	if online; then
 		# 顺手留个健康状况的痕迹（只记不改，脚本不偷偷动 DNS 配置）：
 		# dnsmasq/AGH 挂掉、或校园网临时丢 443 时，"断网"看着都像认证掉了，
@@ -782,13 +808,25 @@ full)
 	if online; then
 		say "外网已通，跳过认证"
 	else
-		do_login || { warn "认证没成功：看上面的输出；重试 sh $0 账号 密码"; exit 1; }
+		do_login; _rc=$?
+		if [ "$_rc" != 0 ]; then
+			if [ "$AUTH_FATAL" = 1 ]; then
+				warn "认证被门户拒绝（账号密码或门户策略问题）—— 先不装启动项，免得每 5 分钟拿错密码去撞门户"
+				warn "    确认账号密码后重跑：sh $0 账号 密码"
+				exit 1
+			fi
+			# 这次没认证成功不等于不用装启动项：真掉线时靠的就是它自动重试。
+			# （旧版这里直接 exit 1，于是"认证没成功"= 启动项也没装 = 以后再也不会自动恢复，实测踩过）
+			warn "这次没认证成功（看上面的原因），但启动项照装 —— 掉线/重启后它会自动重试"
+		fi
 	fi
 	install_autostart
 	info "完成"
 	cat <<EOF
-    以后：$SELF_INSTALL --status      看状态
+    以后：$SELF_INSTALL --status      看状态（外网/DNS/443/时钟 分开报）
           $SELF_INSTALL --auth        手动补一次认证
+          $SELF_INSTALL --install     只补启动项（开机/hotplug/cron）
+          $SELF_INSTALL --clock       按门户校时（NTP 同步不上时用）
           $SELF_INSTALL --uninstall   卸掉启动项
     真实 UA 效果要用**电脑/手机**开 http://ua-check.stagoh.com/ 看（路由器自己 curl 不准）
     加速器/Steam 类流量：UA-Mask 会把非 HTTP 目标卸载到内核，跑一会看
