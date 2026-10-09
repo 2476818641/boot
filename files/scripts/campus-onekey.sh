@@ -12,12 +12,15 @@
 #   ② 认证   本校门户三步接口 login.php → stat.php → ack_auth.php（pass 用 AES-128-ECB 加密）
 #   ③ 启动项 /etc/init.d/campus-onekey（开机）+ hotplug（网口上线）+ cron（每 5 分钟兜底）
 #
-# ★ 判定"上不上得了网"分三层，别混为一谈（混了就会白折腾认证，实测踩过）：
+# ★ 判定"上不上得了网"分四层，别混为一谈（混了就会白折腾认证，实测踩过）：
 #     ① 校园网放没放行 —— 只看 TCP 能不能出（按 IP 测，不需要 DNS）。本校把 ICMP 挡了，
 #        所以 `ping 223.5.5.5` 永远不通，而此刻 `curl http://223.5.5.5/` 是回 404 的（TCP 通）。
 #     ② 本机能不能解析域名 —— dnsmasq → AdGuardHome(127.0.0.1:5625)。AGH 一挂，全屋"断网"，
 #        但校园网其实好得很；此时去重认证一万次也没用。
-#     ③ 门户会话 —— logined=1/acct="" 这类陈旧会话，得先注销再登录（门户一般有 /api/logout.php）。
+#     ③ 出站 443 —— 本校会**临时丢**出站 443（互联网方向；校园网自己的门户 443 是通的）。
+#        表现：所有 HTTPS 突然打不开，而门户、HTTP、DNS 一切照常 —— 最像"认证掉了"的一种。
+#        它还会连累 AdGuardHome 的 DoH 上游（30 秒超时）→ 全屋 DNS 跟着归零。见 ②。
+#     ④ 门户会话 —— logined=1/acct="" 这类陈旧会话，得先注销再登录（门户一般有 /api/logout.php）。
 #
 # 用法：
 #   sh campus-onekey.sh 账号 密码            # 全流程（幂等：已在线也会把伪装配置和启动项补齐）
@@ -113,6 +116,15 @@ dns_ok() {
 		return 1
 	fi
 	ping -c 1 -W 3 www.baidu.com >/dev/null 2>&1
+}
+# 出站 443 通不通（不依赖 DNS，按 IP 打，任何状态码都算通）。
+# 本校实测会**临时丢**这个方向的 443：HTTPS 全挂、门户与 HTTP 照常，
+# 还会把 AdGuardHome 的 DoH 上游拖成 30 秒超时 → 全屋 DNS 归零。
+# 只做观测：留条时间线，下次"突然断网"能直接对上号。
+https_out() {
+	local c
+	c="$(curl -sk -m 6 -o /dev/null -w '%{http_code}' https://223.5.5.5/ 2>/dev/null)"
+	case "$c" in ''|000) return 1 ;; *) return 0 ;; esac
 }
 # 外网通不通。★ 顺序有讲究：本校校园网把 ICMP 挡了，`ping 223.5.5.5` 从来不通，
 # 而那时 TCP 明明是通的。老写法（先 ping、再 curl 域名）在"AGH 挂了"时会判成"外网不通"，
@@ -601,6 +613,7 @@ show_status() {
 	# 外网与 DNS 分开报：AGH 挂掉时前者仍是"通"，一眼就能看出问题在哪
 	printf '外网(按IP): '; if tcp_out; then echo "通 ✅（HTTP $TCP_CODE）"; else echo '不通 ❌'; fi
 	printf '域名解析 : '; if dns_ok; then echo '正常 ✅'; else echo '不通 ❌ → dnsmasq/AdGuardHome 挂了，可用 --dns-fallback 应急'; fi
+	printf '出站 443 : '; if https_out; then echo '通 ✅'; else echo '不通 ❌（HTTPS 全挂；门户/HTTP/DNS 照常，别误判成认证掉了）'; fi
 	printf '账号     : %s\n' "$(uget campus.main.user)"
 	printf '启动项   : init.d=%s hotplug=%s cron=%s\n' \
 		"$([ -x "$INITHOOK" ] && echo 有 || echo 无)" \
@@ -665,9 +678,11 @@ case "$MODE" in
 auto)
 	# cron/hotplug/init.d 用：已经在线就不做事（幂等，静默）
 	if online; then
-		# 顺手留个 DNS 健康的痕迹（只记不改，脚本不偷偷动 DNS 配置）：
-		# dnsmasq/AGH 挂掉时"全屋上不了网"看着像认证掉了，有这行日志下次一眼分清
+		# 顺手留个健康状况的痕迹（只记不改，脚本不偷偷动 DNS 配置）：
+		# dnsmasq/AGH 挂掉、或校园网临时丢 443 时，"断网"看着都像认证掉了，
+		# 有这两行日志下次一眼分清，不用再从门户 API 一路查到防火墙。
 		dns_ok || log "WARN 域名解析不通（本机 dnsmasq/AdGuardHome 挂了？应急：sh $SELF_INSTALL --dns-fallback），但按 IP 的外网是通的"
+		https_out || log "WARN 出站 443 不通（HTTPS 会全挂；门户与 HTTP 照常）—— 本校会临时丢 443，过一阵自己会好"
 		log "already online"; exit 0
 	fi
 	do_login || exit 1
