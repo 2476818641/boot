@@ -76,6 +76,8 @@ PING_TARGET="${PING_TARGET:-223.5.5.5}"			# PING_TARGET=- 表示不做 ping 判�
 DRY_RUN="${DRY_RUN:-0}"
 QUIET="${QUIET:-0}"
 SKIP_DISGUISE="${SKIP_DISGUISE:-0}"
+# --auto（开机/热插拔/cron）发现时钟偏差 >300s 时是否自动按门户校时。1=校（默认），0=只记日志
+CLOCK_AUTO="${CLOCK_AUTO:-1}"
 UA_STR="${UA_STR:-}"
 UA_MODE="${UA_MODE:-regex}"				# regex（正表，推荐）/ all（全量）
 UA_WHITELIST="${UA_WHITELIST:-}"
@@ -606,17 +608,10 @@ clock_skew() {	# 本机比门户慢多少秒（正=本机偏慢）；拿不到�
 	[ -n "$pe" ] || return 1
 	printf '%s' "$((pe - $(date +%s)))"
 }
-clock_check_log() {	# 给 --auto 用：偏差大了才写日志（只记不改）
-	local sk
-	sk="$(clock_skew 2>/dev/null)" || return 0
-	case "${sk:-}" in ''|-) return 0 ;; esac
-	[ "$sk" -lt 0 ] && sk=$((-sk))
-	[ "$sk" -gt 300 ] && log "WARN 本机时钟与门户差 ${sk}s（NTP 同步不上？应急校时：sh $SELF_INSTALL --clock）"
-	return 0
-}
-clock_sync() {	# --clock：按门户时间校时，并写回硬件时钟
+clock_sync() {	# 按门户时间校时，并写回硬件时钟。成功 0；拿不到门户时间返回 1（不 die，
+		# 因为 --auto 也会调它，cron 里不该因为门户一时打不开就报错退出）
 	local iso sk
-	iso="$(portal_iso)" || die "拿不到门户时间 —— $PORTAL 打不开？"
+	iso="$(portal_iso)" || return 1
 	info "门户说：$(portal_date)"
 	info "本机说：$(date '+%F %T %Z')"
 	# 门户给的是 GMT，必须带 -u，否则会被当成本地时间（差一个时区）
@@ -626,6 +621,27 @@ clock_sync() {	# --clock：按门户时间校时，并写回硬件时钟
 	say "    已校时（UTC $iso），硬件时钟也写了"
 	sk="$(clock_skew 2>/dev/null)" || sk=''
 	[ -n "$sk" ] && say "    现在与门户相差 ${sk}s（±60 秒内都算正常）"
+	return 0
+}
+# 给 --auto（开机 / 热插拔 / cron 每 5 分钟）用：偏差大了**直接校**（不只是记日志）。
+# 不加 CLOCK_AUTO=0 的话默认就校 —— 时钟偏掉本身是检测项（文档 §7.1），而且这网
+# 外网 NTP 常常同步不上，靠门户的 Date 头最稳。校时不动任何别的配置，风险极低。
+clock_auto() {
+	local sk
+	sk="$(clock_skew 2>/dev/null)" || return 0
+	case "${sk:-}" in ''|-) return 0 ;; esac
+	[ "$sk" -lt 0 ] && sk=$((-sk))
+	[ "$sk" -gt 300 ] || return 0
+	if [ "$CLOCK_AUTO" = 1 ]; then
+		if clock_sync; then
+			log "时钟与门户差 ${sk}s，已自动按门户校时"
+		else
+			log "WARN 时钟与门户差 ${sk}s，且拿不到门户时间（$PORTAL 打不开？）"
+		fi
+	else
+		log "WARN 本机时钟与门户差 ${sk}s（NTP 同步不上？应急校时：sh $SELF_INSTALL --clock）"
+	fi
+	return 0
 }
 
 # ── DNS 应急开关 ────────────────────────────────────────
@@ -734,7 +750,7 @@ status)    show_status; exit 0 ;;
 ttl)       info "只刷新 TTL 规则（不动 UA-Mask / 不认证）"; setup_ttl; exit 0 ;;
 dnsfb)     dns_set fallback; exit 0 ;;
 dnsagh)    dns_set adgh; exit 0 ;;
-clock)     clock_sync; exit 0 ;;
+clock)     clock_sync || die "拿不到门户时间 —— $PORTAL 打不开？"; exit 0 ;;
 uninstall) uninstall_autostart; exit 0 ;;
 esac
 
@@ -752,7 +768,7 @@ auto)
 		# 有这两行日志下次一眼分清，不用再从门户 API 一路查到防火墙。
 		dns_ok || log "WARN 域名解析不通（本机 dnsmasq/AdGuardHome 挂了？应急：sh $SELF_INSTALL --dns-fallback），但按 IP 的外网是通的"
 		https_out || log "WARN 出站 443 不通（HTTPS 会全挂；门户与 HTTP 照常）—— 本校会临时丢 443，过一阵自己会好"
-		clock_check_log
+		clock_auto
 		log "already online"; exit 0
 	fi
 	do_login || exit 1

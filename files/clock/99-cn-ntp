@@ -1,0 +1,35 @@
+#!/bin/sh
+#
+# 预置国内可达的 NTP，并关掉 NTP server 模式（本机不是时间服务器）
+#
+# 为什么要默认配这个（实机踩过）：
+#   1) 时钟偏移本身就是 Docs/校园网检测项自查.md §7.1 列的检测项 ——
+#      一台从不校时、时间还明显不对的设备，反而比一个"正常的 Windows 主机"更显眼；
+#   2) 这套网络会丢出站 443（实测），UDP 123 也未必通 → 用官方默认的 NTP 池常常同步不上，
+#      实测这台路由器的时间偏了 **2 天 8 小时**（用 GitHub 的 Date 头核对）；
+#   3) 时钟错乱还会让日志时间线没法对（排查时"Oct 7"和"Oct 8"混在一起）、影响 TLS 有效期
+#      判断、apk 校验与 cron 绝对时间。
+#
+# 兜底：campus-onekey.sh 还有一条不依赖外网 NTP 的路径 —— 用校园门户的 HTTP Date 头校时
+#   sh /etc/campus-onekey.sh --clock        # 手动
+#   --auto（开机 + cron 每 5 分钟）在偏差 >300s 时会自动校一次（CLOCK_AUTO=0 可关）
+#
+# uci-defaults 只在（该文件名的）首次启动执行一次；失败会保留重试。
+# 换脚本内容时请改文件名或手动跑一次，否则已刷过的机器不会重新执行。
+
+uci -q set system.ntp.enabled='1'
+uci -q set system.ntp.enable_server='0'
+while uci -q delete system.ntp.server; do :; done
+uci -q add_list system.ntp.server='ntp.aliyun.com'
+uci -q add_list system.ntp.server='ntp1.aliyun.com'
+uci -q add_list system.ntp.server='time1.cloud.tencent.com'
+uci -q add_list system.ntp.server='cn.pool.ntp.org'
+uci -q commit system
+
+/etc/init.d/sysntpd enable 2>/dev/null
+# 这时 DNS 可能还没就绪（AGH 刚起来），解析失败也没关系：sysntpd 会在网络事件后重试，
+# 而且 campus-onekey.sh --auto 会用门户时间兜底。
+/etc/init.d/sysntpd restart 2>/dev/null
+
+logger -t campus-clock "已预置国内 NTP（aliyun/tencent/cn.pool），NTP 同步不上时可用 campus-onekey.sh --clock 按门户校时"
+exit 0

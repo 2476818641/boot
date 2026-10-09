@@ -63,12 +63,33 @@
 
 ### 5. DNS：内置可用的 AdGuard Home
 
-- `/etc/adguardhome/adguardhome.yaml`：5625 端口、bind `127.0.0.1 + 192.168.1.1`、Ali/Tencent DoH 上游、国内 bootstrap、
+- `/etc/adguardhome/adguardhome.yaml`：5625 端口、bind `127.0.0.1 + 192.168.1.1`、国内 bootstrap、
   `ratelimit: 0`、`enable_dnssec: false`、**`os.rlimit_nofile: 0`**
-- `uci-defaults` 自动接线：启用 AGH + `dnsmasq → 127.0.0.1#5625` + `noresolv=1`
+- 上游：**明文 `223.5.5.5` / `119.29.29.29` 优先，Ali/Tencent DoH 作 `fallback_dns`**
+- `local_ptr_upstreams: 127.0.0.1:53`（内网反查交给 dnsmasq，用 DHCP 租约回答；留空会让 AGH 去问不通的 `[::1]:53`）
+- `uci-defaults` 自动接线：启用 AGH + `dnsmasq → 127.0.0.1#5625` **+ 明文救命上游 + `strictorder=1`** + `noresolv=1`
 
-> 两个必须照抄的坑：AGH 跑在 procd jail 里，`rlimit_nofile` 非 0 会 `setrlimit EPERM` 直接 `[fatal]` 退出；
-> dnsmasq 转发让 AGH 把全屋当单一客户端，默认 20 qps 会变成全局限速。
+> 为什么是"明文优先"而不是 DoH 优先：**本校校园网会丢出站 443**（实测：路由器自己发往
+> `223.5.5.5:443`、`www.baidu.com:443` 的 SYN 全部 `UNREPLIED`，而 80 正常、校园门户自己的 443 正常）。
+> DoH 上游全在 443 上 → 每条未缓存域名先等 30 秒超时 → 全屋 DNS 归零，而门户（HTTP、按 IP）
+> 照样打得开，现象极易被误判成"认证掉了"。换到 443 正常的网络想回到加密上游，把 yaml 里
+> `upstream_dns` 与 `fallback_dns` 两组对调即可。
+
+> 两层兜底各管一种故障：**AGH 上游被挡** → AGH 自己切 `fallback_dns`；**AGH 进程死/没在听**
+> → dnsmasq 按 `strictorder` 轮到明文救命上游。任一环挂掉，全屋都还能解析域名。
+
+> 另外两个必须照抄的坑：AGH 跑在 procd jail 里，`rlimit_nofile` 非 0 会 `setrlimit EPERM` 直接
+> `[fatal]` 退出；dnsmasq 转发让 AGH 把全屋当单一客户端，默认 20 qps 会变成全局限速。
+
+### 5.1 时钟：别让路由器的时间偷偷偏掉
+
+- `uci-defaults` 预置国内可达的 NTP（`ntp.aliyun.com` / `ntp1.aliyun.com` / `time1.cloud.tencent.com` / `cn.pool.ntp.org`）
+- `campus-onekey.sh --clock` 用**校园门户的 HTTP `Date` 头**校时（门户按 IP 访问，walled-garden 里也打得开），
+  `--auto`（开机 与 cron 每 5 分钟）在偏差 >300s 时自动校一次；`--status` 会显示与门户的偏差
+
+> 为什么值得单独做：**时钟偏移本身就是文档 §7.1 列的检测项**，而本网 443/123 都可能被丢，
+> 外网 NTP 常常同步不上 —— 实测这台机器曾偏了 **2 天 8 小时**，排查时"Oct 7"与"Oct 8"的日志
+> 混在一起，白白绕了一大圈。
 
 ### 6. 联机：EasyTier 编入固件
 
