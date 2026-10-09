@@ -33,6 +33,7 @@
 #   sh campus-onekey.sh --dns-fallback       # 应急：AdGuardHome 挂了导致全屋解析不了域名时，把 dnsmasq 指回公网 DNS
 #   sh campus-onekey.sh --dns-adgh           # 把 dnsmasq 指回 AdGuardHome(127.0.0.1:5625)
 #   sh campus-onekey.sh --clock              # 按校园门户的 Date 头校时（不需要外网 NTP；时钟偏移本身是检测项）
+#   sh campus-onekey.sh --log                # 只看本脚本留的健康日志（DNS / 443 / 时钟；没输出=正常）
 #   sh campus-onekey.sh --uninstall          # 卸掉启动项 + cron + hotplug
 #   DRY_RUN=1 sh campus-onekey.sh 账号 密码    # 只打印要做的改动，不落盘
 #   SKIP_DISGUISE=1 sh campus-onekey.sh 账号 密码   # 跳过伪装（在别的固件上先只搞认证）
@@ -578,6 +579,20 @@ autostart_missing() {	# 三个启动项有缺就返回 0（用来判断"要不�
 	return 1
 }
 
+show_log() {	# 只看本脚本留的健康日志
+	# ★ `logread -t` 只是**给每行加时间戳**，它不过滤！想按 tag 过滤得用
+	#   `logread -e PATTERN` 或 logread | grep。实测踩过：`logread -t campus-onekey | grep 443`
+	#   会把 AGH 那些历史 DoH 超时全带出来（几百行），看着像刚出事。
+	local n="${1:-40}"
+	info "campus-onekey 的健康日志（最近 $n 条；**没有输出就代表一切正常**）"
+	logread 2>/dev/null | grep -F 'campus-onekey' | tail -n "$n"
+	info "上面只会有这几类行："
+	info "  WARN 域名解析不通…   → 本机 DNS 挂了（--dns-fallback 应急）"
+	info "  WARN 出站 443 不通…  → 校园网临时丢 443（HTTPS 会全挂，门户/HTTP 照常）"
+	info "  WARN 本机时钟与门户差… → NTP 同步不上（--clock 校时）"
+	info "  时钟与门户差 Ns，已自动按门户校时 / already online / auth ok"
+}
+
 uninstall_autostart() {
 	info "卸载启动项"
 	[ -x /etc/init.d/campus-onekey ] && { /etc/init.d/campus-onekey disable >/dev/null 2>&1; /etc/init.d/campus-onekey stop >/dev/null 2>&1; }
@@ -752,8 +767,9 @@ case "${1:-}" in
 --dns-fallback) MODE="dnsfb"; shift ;;
 --dns-adgh)  MODE="dnsagh"; shift ;;
 --clock)     MODE="clock"; shift ;;
+--log)       MODE="log"; shift ;;
 --uninstall) MODE="uninstall"; shift ;;
---help|-h)   sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+--help|-h)   sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 --*)          die "未知参数：$1（试试 --help）" ;;
 esac
 # 账号密码的位置随用法而变：`… 账号 密码` 与 `… --auth 账号 密码` 都要能用
@@ -771,6 +787,7 @@ ttl)       info "只刷新 TTL 规则（不动 UA-Mask / 不认证）"; setup_tt
 dnsfb)     dns_set fallback; exit 0 ;;
 dnsagh)    dns_set adgh; exit 0 ;;
 clock)     clock_sync || die "拿不到门户时间 —— $PORTAL 打不开？"; exit 0 ;;
+log)       show_log "${1:-}"; exit 0 ;;
 uninstall) uninstall_autostart; exit 0 ;;
 esac
 
