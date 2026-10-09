@@ -14,7 +14,9 @@
 #   对方在 Astral 里点"分享"给的链接（astral://room?code=…）可以直接喂给 --astral；
 #   跑 --room 时粘到第一个提问里也行 —— 房间号、房间密码、对方用的服务器全自动读出来。
 #   也接受只粘那串 H4sI 开头的分享码，甚至整段分享文本（会自动从里面叼出码）。
-#   分享码 = base64url(gzip(json))，解码只用 base64 + gzip，不装任何东西。
+#   分享码 = base64url(gzip(json))：gzip/zcat 固件里有，base64 上游 busybox **默认没编**
+#   （BUSYBOX_DEFAULT_BASE64=n），所以解码器按 base64 → openssl base64 -d -A → busybox base64
+#   依次自测挑选；固件那边也把 applet 打开了（CONFIG_BUSYBOX_CONFIG_BASE64=y）。
 #
 # 用法：
 #   sh easytier-onekey.sh                     # 全流程（节点 → 房间 → 端口）
@@ -81,7 +83,7 @@ run() {
 }
 
 # 用法＝文件头那段注释（只有一个定义点，改行数时只改这里）
-usage() { sed -n '2,55p' "$0"; }
+usage() { sed -n '2,57p' "$0"; }
 # -h 不依赖 uci：在电脑 / 其它机器上也能读用法
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
 
@@ -309,6 +311,31 @@ base64_pad() {
 	esac
 }
 
+# base64 → 二进制（stdin→stdout）。
+# ★ 固件的 busybox **默认没编 base64**（上游 Config-defaults.in 里 BUSYBOX_DEFAULT_BASE64=n，
+#   实测就是 "base64: not found"），所以必须有回退，否则 --astral 直接失效：
+#     base64 -d  →  openssl base64 -d -A  →  busybox base64 -d
+#   openssl-util 本来就在固件里（校园脚本认证要用 AES），所以这条回退一直能用。
+#   注意 openssl 必须带 -A：不带时它按 76 列折行解析，而我们这串是单行不折行 → 解不出来（实测）。
+B64_DECODER=''
+astral_b64_pick() {	# 自测出本机可用的解码器，缓存进 B64_DECODER
+	[ -n "$B64_DECODER" ] && return 0
+	if has base64 && [ "$(printf 'aGVsbG8=' | base64 -d 2>/dev/null)" = hello ]; then
+		B64_DECODER='base64 -d'; return 0
+	fi
+	if has openssl && [ "$(printf 'aGVsbG8=' | openssl base64 -d -A 2>/dev/null)" = hello ]; then
+		B64_DECODER='openssl base64 -d -A'; return 0
+	fi
+	if has busybox && [ "$(printf 'aGVsbG8=' | busybox base64 -d 2>/dev/null)" = hello ]; then
+		B64_DECODER='busybox base64 -d'; return 0
+	fi
+	return 1
+}
+astral_b64d() {
+	astral_b64_pick || return 1
+	$B64_DECODER 2>/dev/null
+}
+
 # 分享码 → json 文本。
 # 注意必须用管道直接把字节喂给 gzip：shell 变量存不住 NUL，先 $() 抓一遍会解压失败。
 astral_gunzip() {
@@ -316,9 +343,9 @@ astral_gunzip() {
 	code="$(printf '%s' "$1" | tr -d ' \t\r\n')"
 	code="$(base64_pad "$code")" || return 1
 	if has gzip; then
-		printf '%s' "$code" | tr '_-' '/+' | base64 -d 2>/dev/null | gzip -dc 2>/dev/null
+		printf '%s' "$code" | tr '_-' '/+' | astral_b64d | gzip -dc 2>/dev/null
 	elif has zcat; then
-		printf '%s' "$code" | tr '_-' '/+' | base64 -d 2>/dev/null | zcat 2>/dev/null
+		printf '%s' "$code" | tr '_-' '/+' | astral_b64d | zcat 2>/dev/null
 	else
 		return 1
 	fi
@@ -362,7 +389,14 @@ astral_apply() {
 	local in="$1" code json one norm list=''
 	code="$(astral_extract "$in")"
 	[ -n "$code" ] || { warn "里面没找到分享码 —— 要 astral://room?code=… 或那串 H4sI 开头的码"; return 1; }
-	has base64 || { warn "系统里没有 base64 命令，解不了分享码（用 --room 手填房间号与密码）"; return 1; }
+	if ! astral_b64_pick; then
+		# 实测本固件 busybox 默认没编 base64（BUSYBOX_DEFAULT_BASE64=n）
+		warn "这台机器上找不到可用的 base64 解码器（busybox 默认没编 base64）"
+		warn "  · 有 openssl 就行（固件里通常有）：openssl version"
+		warn "  · 或 apk add coreutils-base64"
+		warn "  · 两条路都没有时，用 --room 手填房间号与密码即可（分享码解出来就是这两样 + 服务器）"
+		return 1
+	fi
 	if ! has gzip && ! has zcat; then
 		warn "系统里没有 gzip/zcat，解不了分享码（apk add gzip；或用 --room 手填）"; return 1
 	fi

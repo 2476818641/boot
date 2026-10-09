@@ -191,6 +191,15 @@ CONFIG_PACKAGE_openssl-util=y
 CONFIG_PACKAGE_kmod-nft-nat=y
 CONFIG_PACKAGE_kmod-nf-nat=y
 
+# ── 本 fork 补：busybox 的 base64 applet（上游默认是 **n**）──────────────────
+# 实测 `base64: not found`，而 easytier-onekey.sh --astral 要解 Astral 分享码
+# （= base64url(gzip(json))，从中取房间号/密码/服务器），少了它这个功能直接失效。
+# 依据：ImmortalWrt 的 package/utils/busybox/Config-defaults.in 里
+#       BUSYBOX_DEFAULT_BASE64=n，而 GZIP/ZCAT/GUNZIP 都是 y —— 所以只缺 base64。
+# 脚本里另加了 openssl 回退（openssl-util 本来就在固件里），两条路都能走；
+# 这里打开 applet 是为了"开箱即用"，代价仅 5.3 kB。
+CONFIG_BUSYBOX_CONFIG_BASE64=y
+
 # ── 本 fork：默认主题换成 Argon（与 JCG Q30 Pro 那台固件同款）──
 # 主题包与设置页都在源码 feed 里，直接选中即可；"设为默认"由下面 Settings.sh 的
 # 那个 sed + files/luci/99-luci-theme 两处一起保证。
