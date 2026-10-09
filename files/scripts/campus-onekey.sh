@@ -12,6 +12,13 @@
 #   ② 认证   本校门户三步接口 login.php → stat.php → ack_auth.php（pass 用 AES-128-ECB 加密）
 #   ③ 启动项 /etc/init.d/campus-onekey（开机）+ hotplug（网口上线）+ cron（每 5 分钟兜底）
 #
+# ★ 判定"上不上得了网"分三层，别混为一谈（混了就会白折腾认证，实测踩过）：
+#     ① 校园网放没放行 —— 只看 TCP 能不能出（按 IP 测，不需要 DNS）。本校把 ICMP 挡了，
+#        所以 `ping 223.5.5.5` 永远不通，而此刻 `curl http://223.5.5.5/` 是回 404 的（TCP 通）。
+#     ② 本机能不能解析域名 —— dnsmasq → AdGuardHome(127.0.0.1:5625)。AGH 一挂，全屋"断网"，
+#        但校园网其实好得很；此时去重认证一万次也没用。
+#     ③ 门户会话 —— logined=1/acct="" 这类陈旧会话，得先注销再登录（门户一般有 /api/logout.php）。
+#
 # 用法：
 #   sh campus-onekey.sh 账号 密码            # 全流程（幂等：已在线也会把伪装配置和启动项补齐）
 #   sh campus-onekey.sh                      # 交互式问账号密码
@@ -19,6 +26,8 @@
 #   sh campus-onekey.sh --auth               # 只认证（不动伪装配置、不装启动项）
 #   sh campus-onekey.sh --ttl                # 只刷新 TTL 规则（补齐入站 TCP/UDP 修复）
 #   sh campus-onekey.sh --auto               # 给 cron/hotplug/init.d 用：静默，只认证
+#   sh campus-onekey.sh --dns-fallback       # 应急：AdGuardHome 挂了导致全屋解析不了域名时，把 dnsmasq 指回公网 DNS
+#   sh campus-onekey.sh --dns-adgh           # 把 dnsmasq 指回 AdGuardHome(127.0.0.1:5625)
 #   sh campus-onekey.sh --uninstall          # 卸掉启动项 + cron + hotplug
 #   DRY_RUN=1 sh campus-onekey.sh 账号 密码    # 只打印要做的改动，不落盘
 #   SKIP_DISGUISE=1 sh campus-onekey.sh 账号 密码   # 跳过伪装（在别的固件上先只搞认证）
@@ -81,10 +90,44 @@ ask() {	# ask <提示> <默认值> → $REPLY
 	printf '%s [%s]: ' "$1" "${2:-}"; if ! read -r REPLY; then REPLY=""; fi
 	[ -z "$REPLY" ] && REPLY="${2:-}"
 }
-online() {	# 外网通不通
+# 按 IP 探测 TCP 出网：**任何** HTTP 状态码（含 404/403）都算通，而且完全不需要 DNS ——
+# 这正是"校园网放行了、但本机解析不了域名"时唯一靠得住的判据。
+ONLINE_IP_PROBES="${ONLINE_IP_PROBES:-http://223.5.5.5/ http://114.114.114.114/}"
+TCP_CODE=''	# tcp_out 成功后填最后一次的 HTTP 状态码（注意：tcp_out 必须在当前 shell 里调，$() 里调是子 shell，看不到）
+tcp_out() {
+	local u c
+	for u in $ONLINE_IP_PROBES; do
+		c="$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$u" 2>/dev/null)"
+		case "$c" in ''|000) : ;; *) TCP_CODE="$c"; return 0 ;; esac
+	done
+	return 1
+}
+# 本机 DNS（dnsmasq → AdGuardHome:5625）能不能解析。跟"校园网放没放行"是两件事，
+# 但体感一模一样（都是"上不了网"），所以必须分开判定、分开报。
+dns_ok() {
+	local n
+	if has nslookup; then
+		for n in www.baidu.com www.qq.com; do
+			nslookup "$n" 127.0.0.1 >/dev/null 2>&1 && return 0
+		done
+		return 1
+	fi
+	ping -c 1 -W 3 www.baidu.com >/dev/null 2>&1
+}
+# 外网通不通。★ 顺序有讲究：本校校园网把 ICMP 挡了，`ping 223.5.5.5` 从来不通，
+# 而那时 TCP 明明是通的。老写法（先 ping、再 curl 域名）在"AGH 挂了"时会判成"外网不通"，
+# 于是脚本报"认证没成功"，人就去反复重认证 —— 白折腾（实测踩过）。
+online() {
 	[ "$PING_TARGET" != "-" ] && ping -c 1 -W 2 "$PING_TARGET" >/dev/null 2>&1 && return 0
+	tcp_out && return 0
 	_c="$(curl -s -m 8 -o /dev/null -w '%{http_code}' "$CHECK_URL" 2>/dev/null)"
 	case "$_c" in 200|204) return 0 ;; esac
+	return 1
+}
+# 认证提交后墙要几秒才放开，给它几次机会
+online_wait() {
+	local i
+	for i in 1 2 3 4; do online && return 0; sleep 2; done
 	return 1
 }
 ret_in() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
@@ -433,10 +476,21 @@ do_login() {
 			;;
 	esac
 	sleep 2
-	if online; then
+	if online_wait; then
 		say "    认证成功 ✅"
 		log "auth ok (user=$CAMPUS_USER)"
 		return 0
+	fi
+	# 门户说成功、却还是上不了网 —— 必须分清是"校园网没放行"还是"本机 DNS 挂了"：
+	# 两者体感一样，但处理方式完全相反（一个是校园网的事，一个是路由器自己的事）。
+	if tcp_out; then
+		warn "    校园网其实**已经放行**（按 IP 的 TCP 出得去，刚测到 HTTP $TCP_CODE），是本机解析不了域名"
+		warn "    → 大概率 dnsmasq → AdGuardHome(127.0.0.1:5625) 挂了。查："
+		warn "        pgrep -f AdGuardHome || echo 'AGH 没在跑'"
+		warn "        nslookup www.baidu.com 127.0.0.1     # 超时/无响应就是这个原因"
+		warn "      应急恢复：sh $0 --dns-fallback（还不行再看 logread | grep -iE 'adguard|dnsmasq'）"
+		log "auth ok but local DNS broken (user=$CAMPUS_USER, tcp=$TCP_CODE)"
+		return 0	# 认证本身是成功的 —— 返回 0，别让 cron 每 5 分钟反复重登
 	fi
 	warn "    提交了但外网还不通（ret=${LAST_RET:-?} msg=$LAST_MSG）"
 	return 1
@@ -509,8 +563,44 @@ uninstall_autostart() {
 	say "    已移除 init.d / hotplug / cron 三项（账号密码仍在 $CONF）"
 }
 
+# ── DNS 应急开关 ────────────────────────────────────────
+# 固件把 dnsmasq 的上游设成 AdGuardHome(127.0.0.1:5625) + noresolv=1：好处是查询内容走 DoH
+# 不外泄，代价是 AGH 一挂**全屋立刻解析不了域名**，体感和"校园网断网"一模一样，
+# 很容易误判成认证掉了然后去反复重认证（实测踩过）。
+dns_set() {	# $1 = fallback | adgh
+	has uci || die "找不到 uci —— 这个脚本要在 OpenWrt 路由器上跑"
+	case "$1" in
+		fallback)
+			info "把 dnsmasq 上游切到公网 DNS（223.5.5.5 / 119.29.29.29）"
+			run uci -q delete dhcp.@dnsmasq[0].server
+			run uci add_list dhcp.@dnsmasq[0].server='223.5.5.5'
+			run uci add_list dhcp.@dnsmasq[0].server='119.29.29.29'
+			;;
+		adgh)
+			info "重启 AdGuardHome，并把 dnsmasq 上游指回 127.0.0.1#5625"
+			[ -x /etc/init.d/adguardhome ] && run /etc/init.d/adguardhome restart
+			run uci -q delete dhcp.@dnsmasq[0].server
+			run uci add_list dhcp.@dnsmasq[0].server='127.0.0.1#5625'
+			;;
+		*)	die "内部用法错误：dns_set $1" ;;
+	esac
+	run uci set dhcp.@dnsmasq[0].noresolv='1'
+	run uci commit dhcp
+	run /etc/init.d/dnsmasq restart
+	[ "$DRY_RUN" = 1 ] && return 0
+	sleep 3
+	if dns_ok; then
+		say "    域名解析已恢复 ✅"
+		[ "$1" = fallback ] && say "    注意：现在是明文 DNS 直连公网；AGH 修好后跑 sh $0 --dns-adgh 切回去"
+	else
+		warn "    还是解析不了 —— 看 logread | grep -iE 'dnsmasq|adguard'；也可能是 AGH 没起来"
+	fi
+}
+
 show_status() {
-	printf '外网     : '; if online; then echo '通 ✅'; else echo '不通 ❌'; fi
+	# 外网与 DNS 分开报：AGH 挂掉时前者仍是"通"，一眼就能看出问题在哪
+	printf '外网(按IP): '; if tcp_out; then echo "通 ✅（HTTP $TCP_CODE）"; else echo '不通 ❌'; fi
+	printf '域名解析 : '; if dns_ok; then echo '正常 ✅'; else echo '不通 ❌ → dnsmasq/AdGuardHome 挂了，可用 --dns-fallback 应急'; fi
 	printf '账号     : %s\n' "$(uget campus.main.user)"
 	printf '启动项   : init.d=%s hotplug=%s cron=%s\n' \
 		"$([ -x "$INITHOOK" ] && echo 有 || echo 无)" \
@@ -544,8 +634,10 @@ case "${1:-}" in
 --auth)      MODE="auth"; shift ;;
 --auto)      MODE="auto"; QUIET=1; shift ;;
 --ttl)       MODE="ttl"; shift ;;
+--dns-fallback) MODE="dnsfb"; shift ;;
+--dns-adgh)  MODE="dnsagh"; shift ;;
 --uninstall) MODE="uninstall"; shift ;;
---help|-h)   sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+--help|-h)   sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 --*)          die "未知参数：$1（试试 --help）" ;;
 esac
 # 账号密码的位置随用法而变：`… 账号 密码` 与 `… --auth 账号 密码` 都要能用
@@ -559,6 +651,8 @@ esac
 case "$MODE" in
 status)    show_status; exit 0 ;;
 ttl)       info "只刷新 TTL 规则（不动 UA-Mask / 不认证）"; setup_ttl; exit 0 ;;
+dnsfb)     dns_set fallback; exit 0 ;;
+dnsagh)    dns_set adgh; exit 0 ;;
 uninstall) uninstall_autostart; exit 0 ;;
 esac
 
