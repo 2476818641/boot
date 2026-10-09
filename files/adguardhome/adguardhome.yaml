@@ -33,22 +33,23 @@ dns:
   ratelimit_whitelist: []
   refuse_any: true
   upstream_dns:
-    - https://dns.alidns.com/dns-query
-    - https://doh.pub/dns-query
+    # ★ 明文优先、DoH 垫底 —— 因为本校校园网**丢出站 443**（实测：路由器自己发的
+    #   443 SYN 全部 UNREPLIED，连 www.baidu.com:443 都是 000，而 80 正常）。
+    #   原来 DoH 优先的写法在这网上等于每条未缓存域名先等 30 秒超时，
+    #   再轮到兜底 —— 全屋体感就是"突然断网"。
+    #   换到 443 正常的网络想回到加密上游：把下面两行的注释对调即可。
+    - 223.5.5.5
+    - 119.29.29.29
   upstream_dns_file: ""
-  # bootstrap 用于解析上面 DoH 上游的域名，必须国内可达（Quad9 在国内连不上，
+  # bootstrap 用于解析下面 DoH 上游的域名，必须国内可达（Quad9 在国内连不上，
   # 一旦用了它，所有 DoH 上游都解析不出来 → 全屋 DNS 直接死）
   bootstrap_dns:
     - 223.5.5.5
     - 119.29.29.29
   fallback_dns:
-    # ★ 明文兜底，只在上面两个 DoH **全部不可达**时才用（AGH 的 fallback 是失败才切换，
-    #   不是并行），所以平时查询仍然走 DoH、不外泄。
-    # 为什么必须有：校园网会挡 443/DoH（实测日志：dns.alidns.com 与 doh.pub 双双
-    # 30 秒超时），而 dnsmasq 是 noresolv=1 + 只认 AGH 这一个上游 —— 兜底一空，
-    # 全屋立刻解析不了域名，体感和"校园网断网"完全一样，特别容易误判成认证掉了。
-    - 223.5.5.5
-    - 119.29.29.29
+    # 明文上游全不可达时才用；443 能通的网络上它才有意义
+    - https://dns.alidns.com/dns-query
+    - https://doh.pub/dns-query
   upstream_mode: load_balance
   fastest_timeout: 1s
   allowed_clients: []
