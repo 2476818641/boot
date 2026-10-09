@@ -91,7 +91,12 @@ dns:
     - fd00::/8
     - fe80::/10
   use_private_ptr_resolvers: true
-  local_ptr_upstreams: []
+  # 内网反查（192.168.x.x → 主机名）交给 dnsmasq，让它用 DHCP 租约/主机名回答。
+  # 不写死这一条时 AGH 会去问"系统解析器"，里面有个 [::1]:53 —— 本固件没有可用的
+  # IPv6 回环，于是每次内网 PTR 查询都干等 2 秒（日志里那条
+  # `upstream_type=local addr=[::1]:53 … i/o timeout` 就是它，纯噪音但会拖慢局域网名字解析）。
+  local_ptr_upstreams:
+    - 127.0.0.1:53
   use_dns64: false
   dns64_prefixes: []
   serve_http3: false

@@ -31,6 +31,7 @@
 #   sh campus-onekey.sh --auto               # 给 cron/hotplug/init.d 用：静默，只认证
 #   sh campus-onekey.sh --dns-fallback       # 应急：AdGuardHome 挂了导致全屋解析不了域名时，把 dnsmasq 指回公网 DNS
 #   sh campus-onekey.sh --dns-adgh           # 把 dnsmasq 指回 AdGuardHome(127.0.0.1:5625)
+#   sh campus-onekey.sh --clock              # 按校园门户的 Date 头校时（不需要外网 NTP；时钟偏移本身是检测项）
 #   sh campus-onekey.sh --uninstall          # 卸掉启动项 + cron + hotplug
 #   DRY_RUN=1 sh campus-onekey.sh 账号 密码    # 只打印要做的改动，不落盘
 #   SKIP_DISGUISE=1 sh campus-onekey.sh 账号 密码   # 跳过伪装（在别的固件上先只搞认证）
@@ -575,6 +576,58 @@ uninstall_autostart() {
 	say "    已移除 init.d / hotplug / cron 三项（账号密码仍在 $CONF）"
 }
 
+# ── 时钟：门户的 Date 头就是现成的权威时间 ──────────────────────────────
+# 为什么专门做这一节：本机时钟偏了不只是日志难对 —— 它**本身就是文档 §7.1 的检测项**
+# （NTP 时钟偏移）。而 443/123 被丢的时候 NTP 往往同步不上（实测这台偏了 2 天多，
+# 排查时"Oct 7"和"Oct 8"的日志混在一起，白绕了一大圈）。
+# 门户是 HTTP、按 IP 访问，walled-garden 里照样打得开 —— 拿它的 Date 头校时最稳，
+# 不依赖任何外网 NTP。
+portal_date() {	# → "Fri, 09 Oct 2026 03:28:34 GMT"
+	curl -sI -m 6 "$PORTAL/" 2>/dev/null | sed -n 's/^[Dd]ate:[[:space:]]*//p' | head -1 | tr -d '\r'
+}
+portal_iso() {	# 门户的 GMT 时间 → busybox date 认的 "YYYY-MM-DD hh:mm:ss"
+	local d m
+	d="$(portal_date)"
+	[ -n "$d" ] || return 1
+	set -- $(printf '%s' "$d" | tr -d ',')
+	#    $1=周几  $2=日  $3=月  $4=年  $5=时:分:秒  $6=GMT
+	[ -n "${2:-}" ] && [ -n "${4:-}" ] && [ -n "${5:-}" ] || return 1
+	case "${3:-}" in
+		Jan) m=01 ;; Feb) m=02 ;; Mar) m=03 ;; Apr) m=04 ;; May) m=05 ;; Jun) m=06 ;;
+		Jul) m=07 ;; Aug) m=08 ;; Sep) m=09 ;; Oct) m=10 ;; Nov) m=11 ;; Dec) m=12 ;;
+		*) return 1 ;;
+	esac
+	printf '%s-%s-%s %s' "$4" "$m" "$2" "$5"
+}
+clock_skew() {	# 本机比门户慢多少秒（正=本机偏慢）；拿不到门户时间就返回非 0
+	local iso pe
+	iso="$(portal_iso)" || return 1
+	pe="$(date -u -d "$iso" +%s 2>/dev/null)" || return 1
+	[ -n "$pe" ] || return 1
+	printf '%s' "$((pe - $(date +%s)))"
+}
+clock_check_log() {	# 给 --auto 用：偏差大了才写日志（只记不改）
+	local sk
+	sk="$(clock_skew 2>/dev/null)" || return 0
+	case "${sk:-}" in ''|-) return 0 ;; esac
+	[ "$sk" -lt 0 ] && sk=$((-sk))
+	[ "$sk" -gt 300 ] && log "WARN 本机时钟与门户差 ${sk}s（NTP 同步不上？应急校时：sh $SELF_INSTALL --clock）"
+	return 0
+}
+clock_sync() {	# --clock：按门户时间校时，并写回硬件时钟
+	local iso sk
+	iso="$(portal_iso)" || die "拿不到门户时间 —— $PORTAL 打不开？"
+	info "门户说：$(portal_date)"
+	info "本机说：$(date '+%F %T %Z')"
+	# 门户给的是 GMT，必须带 -u，否则会被当成本地时间（差一个时区）
+	run date -u -s "$iso"
+	[ -x /sbin/hwclock ] && run hwclock -w
+	[ "$DRY_RUN" = 1 ] && return 0
+	say "    已校时（UTC $iso），硬件时钟也写了"
+	sk="$(clock_skew 2>/dev/null)" || sk=''
+	[ -n "$sk" ] && say "    现在与门户相差 ${sk}s（±60 秒内都算正常）"
+}
+
 # ── DNS 应急开关 ────────────────────────────────────────
 # 固件把 dnsmasq 的上游设成 AdGuardHome(127.0.0.1:5625) + noresolv=1：好处是查询内容走 DoH
 # 不外泄，代价是 AGH 一挂**全屋立刻解析不了域名**，体感和"校园网断网"一模一样，
@@ -610,10 +663,24 @@ dns_set() {	# $1 = fallback | adgh
 }
 
 show_status() {
+	local sk skabs
 	# 外网与 DNS 分开报：AGH 挂掉时前者仍是"通"，一眼就能看出问题在哪
 	printf '外网(按IP): '; if tcp_out; then echo "通 ✅（HTTP $TCP_CODE）"; else echo '不通 ❌'; fi
 	printf '域名解析 : '; if dns_ok; then echo '正常 ✅'; else echo '不通 ❌ → dnsmasq/AdGuardHome 挂了，可用 --dns-fallback 应急'; fi
 	printf '出站 443 : '; if https_out; then echo '通 ✅'; else echo '不通 ❌（HTTPS 全挂；门户/HTTP/DNS 照常，别误判成认证掉了）'; fi
+	# 时钟偏差是 §7.1 的检测项，顺手报出来（门户的 Date 头就是权威时间，不用外网 NTP）
+	printf '时钟     : %s' "$(date '+%F %T %Z')"
+	sk="$(clock_skew 2>/dev/null)" || sk=''
+	if [ -z "$sk" ]; then
+		echo '（拿不到门户时间，无法比对）'
+	else
+		skabs="$sk"; [ "$sk" -lt 0 ] && skabs=$((-sk))
+		if [ "$skabs" -le 60 ]; then
+			echo '（与门户一致 ✅）'
+		else
+			printf '（⚠️ 与门户差 %ss → sh %s --clock 一键校时）\n' "$skabs" "$0"
+		fi
+	fi
 	printf '账号     : %s\n' "$(uget campus.main.user)"
 	printf '启动项   : init.d=%s hotplug=%s cron=%s\n' \
 		"$([ -x "$INITHOOK" ] && echo 有 || echo 无)" \
@@ -649,8 +716,9 @@ case "${1:-}" in
 --ttl)       MODE="ttl"; shift ;;
 --dns-fallback) MODE="dnsfb"; shift ;;
 --dns-adgh)  MODE="dnsagh"; shift ;;
+--clock)     MODE="clock"; shift ;;
 --uninstall) MODE="uninstall"; shift ;;
---help|-h)   sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+--help|-h)   sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 --*)          die "未知参数：$1（试试 --help）" ;;
 esac
 # 账号密码的位置随用法而变：`… 账号 密码` 与 `… --auth 账号 密码` 都要能用
@@ -666,6 +734,7 @@ status)    show_status; exit 0 ;;
 ttl)       info "只刷新 TTL 规则（不动 UA-Mask / 不认证）"; setup_ttl; exit 0 ;;
 dnsfb)     dns_set fallback; exit 0 ;;
 dnsagh)    dns_set adgh; exit 0 ;;
+clock)     clock_sync; exit 0 ;;
 uninstall) uninstall_autostart; exit 0 ;;
 esac
 
@@ -683,6 +752,7 @@ auto)
 		# 有这两行日志下次一眼分清，不用再从门户 API 一路查到防火墙。
 		dns_ok || log "WARN 域名解析不通（本机 dnsmasq/AdGuardHome 挂了？应急：sh $SELF_INSTALL --dns-fallback），但按 IP 的外网是通的"
 		https_out || log "WARN 出站 443 不通（HTTPS 会全挂；门户与 HTTP 照常）—— 本校会临时丢 443，过一阵自己会好"
+		clock_check_log
 		log "already online"; exit 0
 	fi
 	do_login || exit 1
