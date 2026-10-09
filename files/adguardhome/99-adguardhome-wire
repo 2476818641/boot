@@ -13,10 +13,15 @@
 #   1) /etc/config/adguardhome 出厂默认 enabled=0 → 不启用的话 yaml 根本不会被创建；
 #   2) AGH 跑在 procd jail 里，yaml 里 os.rlimit_nofile 必须是 0，
 #      否则 setrlimit 返回 EPERM → [fatal] 退出，respawn 反复失败；
-#   3) dnsmasq 的 noresolv=1 意味着「不再用校园网下发的 DNS」。如果这网在
-#      **未认证前**会挡掉外网 53/DoH，会出现认证页面域名都解析不了的情况。
-#      退路：uci set dhcp.@dnsmasq[0].noresolv='0'; uci commit dhcp; /etc/init.d/dnsmasq restart
-#      或把校园网 DNS 加进 yaml 的 bootstrap_dns 当垫脚石。
+#   3) ★ AGH 是 DNS 链路上的**单点**：dnsmasq 如果只认 AGH 一个上游，AGH 一挂
+#      （进程死 / 端口没听）或者它的 DoH 上游被挡（校园网会挡 443，实测
+#      dns.alidns.com 与 doh.pub 双双 30 秒超时），**全屋立刻解析不了域名** ——
+#      体感和"校园网断网"一模一样，特别容易被误判成认证掉了。
+#      所以这里做两层兜底：
+#        · AGH 自己：yaml 里的 fallback_dns（DoH 全不可达时才用明文）
+#        · dnsmasq  ：AGH 之后再加两条明文上游 + strictorder=1（AGH 不响应才用）
+#      退路还有：sh /etc/campus-onekey.sh --dns-fallback（临时全切明文 DNS）
+#                sh /etc/campus-onekey.sh --dns-adgh（切回 AGH）
 #
 # uci-defaults 只在（该文件名的）首次启动执行一次；失败会保留重试。
 # 换脚本内容时请改文件名或手动跑一次，否则已刷过的机器不会重新执行。
@@ -31,9 +36,16 @@ uci -q commit adguardhome
 /etc/init.d/adguardhome enable 2>/dev/null
 
 # ── 2. 把 dnsmasq 的上游指向 AGH ────────────────────────────────────
-# 清掉原有 server 列表（含校园网下发/手工加的），只留 AGH
+# 清掉原有 server 列表（含校园网下发/手工加的），第一顺位放 AGH
 while uci -q delete dhcp.@dnsmasq[0].server; do :; done
 uci -q add_list dhcp.@dnsmasq[0].server='127.0.0.1#5625'
+# ★ 救命上游：AGH 进程没起来 / 没在听 5625 时，dnsmasq 才不会连累全屋断 DNS。
+#   strictorder=1 = "严格按顺序问"，永远先问 AGH，只有 AGH 不响应才轮到这里，
+#   所以正常情况下查询仍走 AGH→DoH（加密 + 过滤），不泄露。
+#   （AGH 自己上游被挡那种故障由 yaml 的 fallback_dns 兜 —— 两层各管一种）
+uci -q add_list dhcp.@dnsmasq[0].server='223.5.5.5'
+uci -q add_list dhcp.@dnsmasq[0].server='119.29.29.29'
+uci -q set dhcp.@dnsmasq[0].strictorder='1'
 # noresolv=1：不再读 /etc/resolv.conf（校园网 DHCP 下发的 DNS 会被忽略）
 uci -q set dhcp.@dnsmasq[0].noresolv='1'
 uci -q set dhcp.@dnsmasq[0].cachesize='1000'

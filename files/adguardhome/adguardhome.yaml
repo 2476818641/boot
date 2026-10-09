@@ -41,7 +41,14 @@ dns:
   bootstrap_dns:
     - 223.5.5.5
     - 119.29.29.29
-  fallback_dns: []
+  fallback_dns:
+    # ★ 明文兜底，只在上面两个 DoH **全部不可达**时才用（AGH 的 fallback 是失败才切换，
+    #   不是并行），所以平时查询仍然走 DoH、不外泄。
+    # 为什么必须有：校园网会挡 443/DoH（实测日志：dns.alidns.com 与 doh.pub 双双
+    # 30 秒超时），而 dnsmasq 是 noresolv=1 + 只认 AGH 这一个上游 —— 兜底一空，
+    # 全屋立刻解析不了域名，体感和"校园网断网"完全一样，特别容易误判成认证掉了。
+    - 223.5.5.5
+    - 119.29.29.29
   upstream_mode: load_balance
   fastest_timeout: 1s
   allowed_clients: []

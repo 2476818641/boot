@@ -664,7 +664,12 @@ case "$PORTAL" in http://*|https://*) ;; *) die "门户地址看着不对：$POR
 case "$MODE" in
 auto)
 	# cron/hotplug/init.d 用：已经在线就不做事（幂等，静默）
-	if online; then log "already online"; exit 0; fi
+	if online; then
+		# 顺手留个 DNS 健康的痕迹（只记不改，脚本不偷偷动 DNS 配置）：
+		# dnsmasq/AGH 挂掉时"全屋上不了网"看着像认证掉了，有这行日志下次一眼分清
+		dns_ok || log "WARN 域名解析不通（本机 dnsmasq/AdGuardHome 挂了？应急：sh $SELF_INSTALL --dns-fallback），但按 IP 的外网是通的"
+		log "already online"; exit 0
+	fi
 	do_login || exit 1
 	;;
 auth)
