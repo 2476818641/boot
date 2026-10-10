@@ -93,6 +93,18 @@ info() { [ "$QUIET" = 1 ] || printf '\033[1;32m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m[!] %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[1;31m[!] %s\033[0m\n' "$*" >&2; exit 1; }
 log()  { logger -t campus-onekey "$*" 2>/dev/null || true; }
+# 状态变化才写日志（logd 环形缓冲只有 16 KB 左右，每 5 分钟刷屏会把历史冲掉）。
+# 用 /tmp 下的标记文件记住"上一次是什么状态"（tmpfs，重启即清空 —— 重启后重新记一次也无妨）。
+log_state() {	# log_state <键> <异常时的日志内容>
+	[ -f "/tmp/.campus-state-$1" ] && return 0
+	: > "/tmp/.campus-state-$1" 2>/dev/null
+	log "$2"
+}
+log_state_clear() {	# log_state_clear <键> <恢复时的日志内容>：恢复正常时补一行，方便算持续多久
+	[ -f "/tmp/.campus-state-$1" ] || return 0
+	rm -f "/tmp/.campus-state-$1" 2>/dev/null
+	log "$2"
+}
 run()  { if [ "$DRY_RUN" = 1 ]; then printf '    [dry-run] %s\n' "$*"; else "$@"; fi; }
 has()  { command -v "$1" >/dev/null 2>&1; }
 uget() { has uci && uci -q get "$1" 2>/dev/null; }
@@ -710,7 +722,13 @@ show_status() {
 	# 四行分开报：这四种故障体感都是"上不了网"，但修法完全不同（见 §8.1）
 	printf '外网(按IP): '; if tcp_out; then echo "通 ✅（HTTP $TCP_CODE）"; else echo '不通 ❌'; fi
 	printf '域名解析 : '; if dns_ok; then echo '正常 ✅'; else echo '不通 ❌ → dnsmasq/AdGuardHome 挂了，可用 --dns-fallback 应急'; fi
-	printf '出站 443 : '; if https_out; then echo '通 ✅'; else echo '不通 ❌（HTTPS 全挂；门户/HTTP/DNS 照常，别误判成认证掉了）'; fi
+	if https_out; then
+		printf '出站 443 : 通 ✅\n'
+	else
+		printf '出站 443 : 不通 ❌（HTTPS 全挂；门户/HTTP/DNS 照常，别误判成认证掉了）\n'
+		printf '           → 校园网侧封了本线路的出站 443：**重认证没用**（实测过），\n'
+		printf '             只能等它恢复，或让流量走隧道（需要一台校园网外的出口节点）\n'
+	fi
 	# 时钟偏差是 §7.1 的检测项，顺手报出来（门户的 Date 头就是权威时间，不用外网 NTP）
 	printf '时钟     : %s' "$(date '+%F %T %Z')"
 	sk="$(clock_skew 2>/dev/null)" || sk=''
@@ -806,11 +824,13 @@ auto)
 		install_autostart
 	fi
 	if online; then
-		# 顺手留个健康状况的痕迹（只记不改，脚本不偷偷动 DNS 配置）：
-		# dnsmasq/AGH 挂掉、或校园网临时丢 443 时，"断网"看着都像认证掉了，
-		# 有这两行日志下次一眼分清，不用再从门户 API 一路查到防火墙。
-		dns_ok || log "WARN 域名解析不通（本机 dnsmasq/AdGuardHome 挂了？应急：sh $SELF_INSTALL --dns-fallback），但按 IP 的外网是通的"
-		https_out || log "WARN 出站 443 不通（HTTPS 会全挂；门户与 HTTP 照常）—— 本校会临时丢 443，过一阵自己会好"
+		# 顺手留个健康状况的痕迹（只记不改，脚本不偷偷动 DNS 配置）。
+		# ★ 只在"状态变化"时写：logd 的环形缓冲很小（默认 16 KB），每 5 分钟刷一遍
+		#   会把别的日志一起冲掉 —— 实测踩过：443 红了几小时，--log 里却什么都看不到。
+		if dns_ok; then log_state_clear dns "域名解析恢复"
+		else log_state dns "WARN 域名解析不通（本机 dnsmasq/AdGuardHome 挂了？应急：sh $SELF_INSTALL --dns-fallback），但按 IP 的外网是通的"; fi
+		if https_out; then log_state_clear https "出站 443 恢复（HTTPS 又能用了）"
+		else log_state https "WARN 出站 443 不通（HTTPS 全挂；门户/HTTP/DNS 照常）—— 校园网侧封锁本线路的出站 443，不是认证问题，等它自己恢复"; fi
 		clock_auto
 		log "already online"; exit 0
 	fi
