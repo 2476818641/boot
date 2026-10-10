@@ -938,7 +938,13 @@ show_status() {
 			printf '（⚠️ 与门户差 %ss → sh %s --clock 一键校时）\n' "$skabs" "$0"
 		fi
 	fi
-	printf '账号     : %s\n' "$(uget campus.main.user)"
+	_pu="$(uget campus.main.user)"
+	if [ -n "$_pu" ]; then
+		printf '账号     : %s\n' "$_pu"
+	else
+		# 没凭据＝掉线后 cron 没法自动重认证（刷完机跑 full 时网正好通就会这样）
+		printf '账号     : （空）⚠️ 没存凭据 → 掉线后不会自动重认证，跑一次：sh %s --auth 账号 密码\n' "$SELF_INSTALL"
+	fi
 	printf '启动项   : init.d=%s hotplug=%s cron=%s\n' \
 		"$([ -x "$INITHOOK" ] && echo 有 || echo 无)" \
 		"$([ -x "$HOOKFILE" ] && echo 有 || echo 无)" \
@@ -1056,10 +1062,28 @@ auth)
 	do_login || exit 1
 	;;
 full)
+	read_conf
 	info "本校校园网一键：伪装 → 认证 → 启动项（账号 ${CAMPUS_USER:-（配置里/稍后问）}）"
 	[ "$SKIP_DISGUISE" = 1 ] && say "（SKIP_DISGUISE=1：跳过伪装）" || setup_disguise
 	if online; then
 		say "外网已通，跳过认证"
+		# ★ 跳过认证也要把账号密码存下来：否则一旦掉线，cron --auto 没凭据可用，
+		#   只能手动再跑一次（实测踩过：刷完机跑 full 时网正好是通的 → 账号一直是空的，
+		#   而 status 里那行"账号"为空就是它的信号）。
+		if [ -n "${CAMPUS_USER:-}" ] && [ -n "${CAMPUS_PASS:-}" ]; then
+			if [ "$DRY_RUN" = 1 ]; then
+				printf '    [dry-run] 保存账号到 %s（user=%s）\n' "$CONF" "$CAMPUS_USER"
+			else
+				if write_conf "$CAMPUS_USER" "$CAMPUS_PASS"; then
+					say "    账号密码已存到 $CONF（掉线时 cron 才有凭据自动重认证）"
+				else
+					warn "    写 $CONF 失败 —— 掉线后 cron 会因缺凭据而无法自动认证"
+				fi
+			fi
+		else
+			warn "    这次没给账号密码：掉线后 cron 无法自动重认证"
+			warn "      现在补一条即可：sh $0 --auth 账号 密码"
+		fi
 	else
 		do_login; _rc=$?
 		if [ "$_rc" != 0 ]; then
