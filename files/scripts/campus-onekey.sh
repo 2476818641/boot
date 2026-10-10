@@ -34,6 +34,9 @@
 #   sh campus-onekey.sh --dns-adgh           # 把 dnsmasq 指回 AdGuardHome(127.0.0.1:5625)
 #   sh campus-onekey.sh --clock              # 按校园门户的 Date 头校时（不需要外网 NTP；时钟偏移本身是检测项）
 #   sh campus-onekey.sh --log                # 只看本脚本留的健康日志（DNS / 443 / 时钟；没输出=正常）
+#   sh campus-onekey.sh --probe              # 探测本线路的出站端口策略（判断是"只封 443"还是"白名单受限"）
+#   sh campus-onekey.sh --relogin            # ★围墙花园状态自愈：先注销残留会话(api/logoff.php) 再重新认证
+#   sh campus-onekey.sh --logout             # 只注销门户会话
 #   sh campus-onekey.sh --uninstall          # 卸掉启动项 + cron + hotplug
 #   DRY_RUN=1 sh campus-onekey.sh 账号 密码    # 只打印要做的改动，不落盘
 #   SKIP_DISGUISE=1 sh campus-onekey.sh 账号 密码   # 跳过伪装（在别的固件上先只搞认证）
@@ -605,6 +608,80 @@ show_log() {	# 只看本脚本留的健康日志
 	info "  时钟与门户差 Ns，已自动按门户校时 / already online / auth ok"
 }
 
+# ── 出站端口策略探测 ────────────────────────────────────────────────
+# 什么时候用：--status 里"出站 443 不通"、但 HTTP/DNS 正常，想知道是"只封 443"
+# 还是"整条线路被扔进了白名单模式"。后者是大问题（门户里 acct 为空就是它的特征），
+# 而且会让隧道（11010）与 HTTPS 一起废掉。
+probe_out() {
+	local p o
+	info "出站端口策略探测（目标 223.5.5.5，按 IP 访问，不受 DNS 影响）"
+	if [ "$PING_TARGET" != "-" ] && ping -c 1 -W 2 "$PING_TARGET" >/dev/null 2>&1; then
+		printf '  ICMP      : 通\n'
+	else
+		printf '  ICMP      : 不通（本校常态，单独不能说明问题）\n'
+	fi
+	for p in ${PROBE_PORTS:-80 443 8080 8443 8888 2052 11010}; do
+		o="$(curl -v -m 4 -o /dev/null "http://223.5.5.5:$p/" 2>&1)"
+		case "$o" in
+			*onnected*) printf '  TCP %-5s : 放行（TCP 连上了）\n' "$p" ;;
+			*refused*)  printf '  TCP %-5s : 放行（对面没服务＝包出去了）\n' "$p" ;;
+			*timed*)    printf '  TCP %-5s : **被挡**（超时，包被丢）\n' "$p" ;;
+			*)          printf '  TCP %-5s : 结果不明（%s）\n' "$p" "$(printf '%s' "$o" | tail -1)" ;;
+		esac
+	done
+	info "怎么读："
+	info "  只有 80 / 53 通        → 线路被扔进「白名单/受限」状态：HTTPS、隧道(11010) 一起废"
+	info "                           门户里 acct 为空、logined=1 正是这个状态的特征"
+	info "  只有 443 被挡          → 单纯封 HTTPS，HTTP 与隧道正常"
+	info "  都通                   → 正常"
+}
+
+# ── 门户会话状态 / 注销 ─────────────────────────────────────────────
+# 为什么专门做这个：网关把"IP 在线但没绑账号"（acct 为空、logined=1）的会话
+# 当**未认证访客**处理 → 只放行围墙花园（门户 + 80 + 53），
+# 于是 HTTPS、隧道(11010) 全废，而门户 API 还一路 ret=0、stat 还说"认证成功"，
+# 重认证也没用（login.php 看 logined=1 就直接返回，从不重新绑定）。
+# 这种状态只有一个解法：**先注销掉这个残留会话，再重新认证**。
+# 接口名是从门户的 /assets/js/raas.js 里挖出来的：api/logoff.php（还有 getacct.php 可查绑定）。
+portal_state() {	# 输出 "<logined>|<acct>|<sessionlogined>"，拿不到就返回 1
+	local r
+	r="$(curl_auth -m 6 "$PORTAL/api/ip.php" 2>/dev/null)" || return 1
+	r="$(json_strip_jsonp "$r")"
+	[ -n "$r" ] || return 1
+	printf '%s|%s|%s' "$(json_num "$r" logined)" "$(json_str "$r" acct)" "$(json_num "$r" sessionlogined)"
+}
+do_logout() {	# 注销门户会话（把残留的"空账号在线"状态清掉）
+	local url="$PORTAL${LOGOUT_PATH:-/api/logoff.php}" resp ret msg pw=''
+	read_conf
+	info "注销门户会话：$url"
+	# 与登录同构：user + pass（AES 密文）+ EXTRA_FIELDS。门户的 logoff 一般就吃这一套；
+	# 吃不进去（返回空 ret）时用 LOGOUT_PATH / LOGOUT_EXTRA 覆盖着试，
+	# 接口定义在 $PORTAL/assets/js/raas.js（搜 logoff）。
+	[ -n "${CAMPUS_PASS:-}" ] && pw="$(raas_encode "$CAMPUS_PASS" 2>/dev/null || true)"
+	if [ "$DRY_RUN" = 1 ]; then
+		printf '    [dry-run] GET %s/（拿 cookie）\n' "$PORTAL"
+		printf '    [dry-run] POST %s（user=%s pass=%s + %s）\n' "$url" "${CAMPUS_USER:-?}" "${pw:+<AES>}" "${LOGOUT_EXTRA:-$EXTRA_FIELDS}"
+		return 0
+	fi
+	curl_auth -c "$COOKIE" -b "$COOKIE" -o /dev/null "$PORTAL/" 2>/dev/null || true
+	resp="$(curl_auth -b "$COOKIE" -c "$COOKIE" \
+		-H 'X-Requested-With: XMLHttpRequest' -H "Referer: $PORTAL/" -H "Origin: $PORTAL" \
+		-X POST "$url" \
+		--data-urlencode "$USER_FIELD=${CAMPUS_USER:-}" \
+		--data-urlencode "$PASS_FIELD=$pw" \
+		--data "${LOGOUT_EXTRA:-$EXTRA_FIELDS}" 2>/dev/null)"
+	resp="$(json_strip_jsonp "$resp")"
+	ret="$(json_num "$resp" ret)"; msg="$(json_str "$resp" msg)"
+	say "    ${LOGOUT_PATH:-/api/logoff.php} → ret=${ret:-?} msg=${msg:-（空）}"
+	say "    原始响应：$(printf '%s' "$resp" | head -c 160)"
+	log "logoff: ret=${ret:-?} msg=${msg:-（空）} user=${CAMPUS_USER:-?}"
+	case "${ret:-}" in
+		0|3|121|122) say "    注销已提交 ✅（接着 --relogin 重新登录）"; return 0 ;;
+		'') warn "    门户没返回 ret —— 接口/字段可能不对（看上面原始响应；raas.js 里搜 logoff）"; return 1 ;;
+		*)  warn "    注销被拒：ret=$ret msg=$msg"; return 1 ;;
+	esac
+}
+
 uninstall_autostart() {
 	info "卸载启动项"
 	[ -x /etc/init.d/campus-onekey ] && { /etc/init.d/campus-onekey disable >/dev/null 2>&1; /etc/init.d/campus-onekey stop >/dev/null 2>&1; }
@@ -718,7 +795,7 @@ dns_set() {	# $1 = fallback | adgh
 }
 
 show_status() {
-	local sk skabs
+	local sk skabs ps pl pa psl rest
 	# 四行分开报：这四种故障体感都是"上不了网"，但修法完全不同（见 §8.1）
 	printf '外网(按IP): '; if tcp_out; then echo "通 ✅（HTTP $TCP_CODE）"; else echo '不通 ❌'; fi
 	printf '域名解析 : '; if dns_ok; then echo '正常 ✅'; else echo '不通 ❌ → dnsmasq/AdGuardHome 挂了，可用 --dns-fallback 应急'; fi
@@ -726,10 +803,24 @@ show_status() {
 		printf '出站 443 : 通 ✅\n'
 	else
 		printf '出站 443 : 不通 ❌（HTTPS 全挂；门户/HTTP/DNS 照常，别误判成认证掉了）\n'
-		printf '           → 校园网侧封了本线路的出站 443：**重认证没用**（实测过），\n'
-		printf '             只能等它恢复，或让流量走隧道（需要一台校园网外的出口节点）\n'
+		printf '           → 先看下面"门户会话"：acct 空就是围墙花园状态，用 --relogin 修\n'
 	fi
-	# 时钟偏差是 §7.1 的检测项，顺手报出来（门户的 Date 头就是权威时间，不用外网 NTP）
+	# 门户会话：acct 为空 + logined=1 = 网关把这条线路当"未认证访客"，只放行 80/53。
+	# 这时 HTTPS 与隧道全废，而且**重认证没用**（login.php 见 logined=1 直接返回、不重绑），
+	# 必须先注销残留会话（门户 JS 里的 api/logoff.php）再登录。
+	ps="$(portal_state 2>/dev/null)" || ps=''
+	if [ -z "$ps" ]; then
+		printf '门户会话 : 查不到（$PORTAL 打不开？）\n'
+	else
+		pl="${ps%%|*}"; rest="${ps#*|}"; pa="${rest%%|*}"; psl="${rest#*|}"
+		if [ "$pl" = 1 ] && [ -z "$pa" ]; then
+			printf '门户会话 : logined=1 acct=（空）session=%s\n' "$psl"
+			printf '           → ⚠️ IP 在线但**没绑账号**＝网关只给围墙花园（实测只放行 80/53）：\n'
+			printf '             HTTPS、隧道(11010) 全废，重认证无效 → sh %s --relogin\n' "$SELF_INSTALL"
+		else
+			printf '门户会话 : logined=%s acct=%s session=%s\n' "$pl" "${pa:-（空）}" "$psl"
+		fi
+	fi
 	printf '时钟     : %s' "$(date '+%F %T %Z')"
 	sk="$(clock_skew 2>/dev/null)" || sk=''
 	if [ -z "$sk" ]; then
@@ -786,8 +877,11 @@ case "${1:-}" in
 --dns-adgh)  MODE="dnsagh"; shift ;;
 --clock)     MODE="clock"; shift ;;
 --log)       MODE="log"; shift ;;
+--probe)     MODE="probe"; shift ;;
+--logout)    MODE="logout"; shift ;;
+--relogin)   MODE="relogin"; shift ;;
 --uninstall) MODE="uninstall"; shift ;;
---help|-h)   sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+--help|-h)   sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 --*)          die "未知参数：$1（试试 --help）" ;;
 esac
 # 账号密码的位置随用法而变：`… 账号 密码` 与 `… --auth 账号 密码` 都要能用
@@ -806,6 +900,19 @@ dnsfb)     dns_set fallback; exit 0 ;;
 dnsagh)    dns_set adgh; exit 0 ;;
 clock)     clock_sync || die "拿不到门户时间 —— $PORTAL 打不开？"; exit 0 ;;
 log)       show_log "${1:-}"; exit 0 ;;
+probe)     probe_out; exit 0 ;;
+logout)    do_logout; exit $? ;;
+relogin)
+	# 围墙花园状态（IP 在线但没绑账号）的自愈顺序：先注销残留会话，再重新认证
+	info "① 先注销残留会话（清掉 acct 为空的"在线"状态）"
+	do_logout || warn "注销没成功——仍旧继续尝试登录（有些门户允许直接覆盖会话）"
+	sleep 2
+	info "② 再重新认证"
+	do_login || { warn "重登没成功，看上面的输出"; exit 1; }
+	ps="$(portal_state 2>/dev/null)" || ps=''
+	[ -n "$ps" ] && say "    现在门户状态：logined=${ps%%|*} acct=$(printf '%s' "${ps#*|}" | cut -d'|' -f1)"
+	exit 0
+	;;
 uninstall) uninstall_autostart; exit 0 ;;
 esac
 
