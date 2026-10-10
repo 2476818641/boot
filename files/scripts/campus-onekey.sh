@@ -740,11 +740,28 @@ mac_info() {	# 输出 "<uci段名> <当前MAC> <当前IP>"
 	ip4="$(ip -4 -o addr show dev "$dev" 2>/dev/null | awk '{print $4}' | head -1)"
 	printf '%s %s %s' "$sec" "${mac:-?}" "${ip4:-无}"
 }
+# 硬件（永久）MAC：`ip link` 的 permaddr 或 ethtool -P；读不到返回空
+perm_mac() {
+	local d="${1:-wan}" m
+	m="$(ip -d link show dev "$d" 2>/dev/null | sed -n 's/.*permaddr \([0-9a-fA-F:]\{17\}\).*/\1/p' | head -1)"
+	[ -n "$m" ] || m="$(ip link show dev "$d" 2>/dev/null | sed -n 's/.*permaddr \([0-9a-fA-F:]\{17\}\).*/\1/p' | head -1)"
+	[ -n "$m" ] || m="$(ethtool -P "$d" 2>/dev/null | awk '{print $3}')"
+	case "$m" in
+		[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:*) printf '%s' "$m" ;;
+		*) : ;;
+	esac
+}
+wan_has_ip() { ip -4 -o addr show dev wan 2>/dev/null | grep -q 'inet '; }
+portal_reach() { curl -s -m 5 -o /dev/null "$PORTAL/" 2>/dev/null; }
+
 do_new_mac() {
-	local sec mac ip4 new="${1:-}"
+	local sec mac ip4 new="${1:-}" i pm
 	# ★ 必须先取 $1 再 set --，否则 set -- 会把函数自己的参数覆盖掉（踩过）
 	set -- $(mac_info); sec="$1"; mac="$2"; ip4="$3"
-	info "换 WAN MAC（段 network.$sec，当前 MAC=$mac IP=$ip4）"
+	pm="$(perm_mac wan)"
+	info "换 WAN MAC（段 network.$sec，当前 MAC=$mac IP=$ip4${pm:+，硬件 MAC=$pm}）"
+	warn "    注意：这会重新申请 IP。若校园网做了 MAC 绑定/端口安全，可能拿不到地址甚至断网；"
+	warn "          本脚本两步都失败会自动回退（回退不掉就 reboot）"
 	# 读不到当前 MAC 就别硬造（否则会写出一个畸形 MAC 把 WAN 弄断）
 	case "$mac" in
 		[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:*) : ;;
@@ -761,16 +778,29 @@ do_new_mac() {
 		*) die "MAC 格式不对：$new" ;;
 	esac
 	say "    $mac → $new"
+	say "    （任何一步不对劲都会**自动回退**；回退不掉就 reboot，驱动 probe 时会用硬件 MAC）"
 	run uci set "network.$sec.macaddr=$new"
 	run uci commit network
 	run ifdown wan
 	run sleep 3
 	run ifup wan
 	[ "$DRY_RUN" = 1 ] && return 0
-	sleep 12
-	ip4="$(ip -4 -o addr show dev wan 2>/dev/null | awk '{print $4}' | head -1)"
-	say "    新 IP：${ip4:-还没拿到（再等等，或看 logread）}"
-	# 网口 up 会触发 hotplug 自动认证；这里再补一次，然后看档位
+	# ★ 安全网 1：等 DHCP 给地址。等不到说明这个 MAC 被拒/端口安全 → 立刻回退，
+	#   绝不把它留在"没地址"的状态（实测踩过：换完 MAC 直接断网）。
+	i=0
+	while [ "$i" -lt 10 ]; do sleep 4; wan_has_ip && break; i=$((i + 1)); done
+	if ! wan_has_ip; then
+		warn "    换 MAC 后等不到 IP（$((i * 4)) 秒）—— **自动回退**"
+		do_mac_restore
+		return 1
+	fi
+	say "    新 IP：$(ip -4 -o addr show dev wan | awk '{print $4}' | head -1)"
+	# ★ 安全网 2：连门户都打不开 = 这个 MAC 上不了网（MAC 绑定/MAC 认证）→ 回退
+	if ! portal_reach; then
+		warn "    拿到 IP 但门户 ping 不通 —— 这个 MAC 大概率被网关拒（MAC 绑定/认证）→ **自动回退**"
+		do_mac_restore
+		return 1
+	fi
 	do_login >/dev/null 2>&1 || warn "    自动认证没成功，稍后 cron 会兜（或手动 --auth）"
 	sleep 2
 	say "    线路档位：$(line_tier)"
@@ -778,15 +808,25 @@ do_new_mac() {
 	say "    回退：sh $0 --mac-restore"
 }
 do_mac_restore() {
-	local sec
+	local sec pm i
 	sec="$(mac_info)"; sec="${sec%% *}"
-	info "删掉 WAN MAC 覆盖（network.$sec.macaddr），回到硬件 MAC"
+	pm="$(perm_mac wan)"
+	info "去掉 WAN MAC 覆盖（network.$sec.macaddr）${pm:+，并显式设回硬件 MAC $pm}"
 	run uci -q delete "network.$sec.macaddr"
+	# 光删 uci 选项，网卡上可能还挂着改过的 MAC（内核不会自动退回 permaddr），
+	# 所以读到 permaddr 就显式设回去 —— 这样不用重启也能复原。
+	[ -n "$pm" ] && run uci set "network.$sec.macaddr=$pm"
 	run uci commit network
 	run ifdown wan; run sleep 3; run ifup wan
 	[ "$DRY_RUN" = 1 ] && return 0
-	sleep 12
-	say "    现在：(段 $(mac_info | cut -d' ' -f1) MAC $(mac_info | cut -d' ' -f2) IP $(mac_info | cut -d' ' -f3))"
+	i=0
+	while [ "$i" -lt 8 ]; do sleep 4; wan_has_ip && break; i=$((i + 1)); done
+	if wan_has_ip; then
+		say "    已恢复：$(mac_info)"
+	else
+		warn "    还没拿到 IP。下一步：reboot（驱动 probe 时会用硬件 MAC 重新初始化网卡）"
+		warn "    若重启后仍无 IP，就是校园网侧对该 MAC/端口做了限制 —— 需要联系网管"
+	fi
 }
 
 uninstall_autostart() {
