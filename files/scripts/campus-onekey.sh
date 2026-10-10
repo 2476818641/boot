@@ -37,6 +37,8 @@
 #   sh campus-onekey.sh --probe              # 探测本线路的出站端口策略（判断是"只封 443"还是"白名单受限"）
 #   sh campus-onekey.sh --relogin            # ★围墙花园状态自愈：先注销残留会话(api/logoff.php) 再重新认证
 #   sh campus-onekey.sh --logout             # 只注销门户会话
+#   sh campus-onekey.sh --new-mac            # ★网关单独限制本设备时用：换 WAN MAC → 新 IP → 重新认证
+#   sh campus-onekey.sh --mac-restore        # 回退（删掉 MAC 覆盖，恢复硬件 MAC）
 #   sh campus-onekey.sh --uninstall          # 卸掉启动项 + cron + hotplug
 #   DRY_RUN=1 sh campus-onekey.sh 账号 密码    # 只打印要做的改动，不落盘
 #   SKIP_DISGUISE=1 sh campus-onekey.sh 账号 密码   # 跳过伪装（在别的固件上先只搞认证）
@@ -720,6 +722,73 @@ do_logout() {	# 注销门户会话（把残留的"空账号在线"状态清掉�
 	esac
 }
 
+# ── 换 WAN MAC：对付"网关单独限制这个设备"的档位 ─────────────────────
+# 依据（10-10 实测推理链）：
+#   · 同账号的手机直连校园网 HTTPS 正常 → **账号没被封**
+#   · 本机 --relogin 成功（logoff 回"下线成功"、login 回"认证成功"）后 443 依旧被挡
+#     → 不是会话/认证问题
+#   · 剩下最可能的就是"网关按设备（MAC/IP）给了限制档位"
+#   换掉 WAN MAC → 网关眼里是新设备 → 通常会重新分配 IP、重新认证，限制档位大概率消失。
+# 副作用：会占一个"设备数"名额（旧记录过期后释放）；网关/交换机侧可能有 MAC 绑定告警。
+# 回退：sh 本脚本 --mac-restore
+mac_info() {	# 输出 "<uci段名> <当前MAC> <当前IP>"
+	local sec dev mac ip4
+	dev="$(uci -q get network.wan.device 2>/dev/null)"; [ -n "$dev" ] || dev=wan
+	sec="$(uci show network 2>/dev/null | sed -n "s/^network\.\([A-Za-z0-9_]*\)\.device='$dev'\$/\1/p" | head -1)"
+	[ -n "$sec" ] || sec=wan
+	mac="$(cat /sys/class/net/$dev/address 2>/dev/null)"
+	ip4="$(ip -4 -o addr show dev "$dev" 2>/dev/null | awk '{print $4}' | head -1)"
+	printf '%s %s %s' "$sec" "${mac:-?}" "${ip4:-无}"
+}
+do_new_mac() {
+	local sec mac ip4 new="${1:-}"
+	# ★ 必须先取 $1 再 set --，否则 set -- 会把函数自己的参数覆盖掉（踩过）
+	set -- $(mac_info); sec="$1"; mac="$2"; ip4="$3"
+	info "换 WAN MAC（段 network.$sec，当前 MAC=$mac IP=$ip4）"
+	# 读不到当前 MAC 就别硬造（否则会写出一个畸形 MAC 把 WAN 弄断）
+	case "$mac" in
+		[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:*) : ;;
+		*) die "读不到 WAN 的当前 MAC（拿到的是 '$mac'）—— 先看 uci show network | grep -i wan 确认 device 名" ;;
+	esac
+	# 新 MAC：保留前四字节（同厂商、不显眼），后两字节随机。
+	# 用 rand_byte() 而不是 $RANDOM —— busybox 的 ash 不一定编了 RANDOM，
+	# 而脚本是 set -u，直接写 $RANDOM 会在没编的环境里报"参数未设置"直接退出。
+	if [ -z "$new" ]; then
+		new="$(printf '%s' "$mac" | cut -d: -f1-4):$(printf '%02x' "$(rand_byte)"):$(printf '%02x' "$(rand_byte)")"
+	fi
+	case "$new" in
+		[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]) : ;;
+		*) die "MAC 格式不对：$new" ;;
+	esac
+	say "    $mac → $new"
+	run uci set "network.$sec.macaddr=$new"
+	run uci commit network
+	run ifdown wan
+	run sleep 3
+	run ifup wan
+	[ "$DRY_RUN" = 1 ] && return 0
+	sleep 12
+	ip4="$(ip -4 -o addr show dev wan 2>/dev/null | awk '{print $4}' | head -1)"
+	say "    新 IP：${ip4:-还没拿到（再等等，或看 logread）}"
+	# 网口 up 会触发 hotplug 自动认证；这里再补一次，然后看档位
+	do_login >/dev/null 2>&1 || warn "    自动认证没成功，稍后 cron 会兜（或手动 --auth）"
+	sleep 2
+	say "    线路档位：$(line_tier)"
+	say "    443：$(probe_word "$(probe_one 223.5.5.5 443)")（用 --probe 看全貌）"
+	say "    回退：sh $0 --mac-restore"
+}
+do_mac_restore() {
+	local sec
+	sec="$(mac_info)"; sec="${sec%% *}"
+	info "删掉 WAN MAC 覆盖（network.$sec.macaddr），回到硬件 MAC"
+	run uci -q delete "network.$sec.macaddr"
+	run uci commit network
+	run ifdown wan; run sleep 3; run ifup wan
+	[ "$DRY_RUN" = 1 ] && return 0
+	sleep 12
+	say "    现在：(段 $(mac_info | cut -d' ' -f1) MAC $(mac_info | cut -d' ' -f2) IP $(mac_info | cut -d' ' -f3))"
+}
+
 uninstall_autostart() {
 	info "卸载启动项"
 	[ -x /etc/init.d/campus-onekey ] && { /etc/init.d/campus-onekey disable >/dev/null 2>&1; /etc/init.d/campus-onekey stop >/dev/null 2>&1; }
@@ -916,6 +985,8 @@ case "${1:-}" in
 --probe)     MODE="probe"; shift ;;
 --logout)    MODE="logout"; shift ;;
 --relogin)   MODE="relogin"; shift ;;
+--new-mac)   MODE="newmac"; shift ;;
+--mac-restore) MODE="macrestore"; shift ;;
 --uninstall) MODE="uninstall"; shift ;;
 --help|-h)   sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 --*)          die "未知参数：$1（试试 --help）" ;;
@@ -937,6 +1008,8 @@ dnsagh)    dns_set adgh; exit 0 ;;
 clock)     clock_sync || die "拿不到门户时间 —— $PORTAL 打不开？"; exit 0 ;;
 log)       show_log "${1:-}"; exit 0 ;;
 probe)     probe_out; exit 0 ;;
+newmac)    do_new_mac "${1:-}"; exit 0 ;;
+macrestore) do_mac_restore; exit 0 ;;
 logout)    do_logout; exit $? ;;
 relogin)
 	# 围墙花园状态（IP 在线但没绑账号）的自愈顺序：先注销残留会话，再重新认证
