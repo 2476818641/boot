@@ -139,13 +139,35 @@ dns_ok() {
 	fi
 	ping -c 1 -W 3 www.baidu.com >/dev/null 2>&1
 }
+# 探测某个端口能不能出网（按 IP，绕开 DNS）：open=包发出去了，block=被丢
+probe_one() {
+	local o
+	o="$(curl -v -m 4 -o /dev/null "http://${PROBE_HOST:-223.5.5.5}:$1/" 2>&1)"
+	case "$o" in
+		*onnected*) printf 'open' ;;	# TCP 连上了
+		*refused*)  printf 'open' ;;	# 对面没服务，但包出去了 → 也算放行
+		*timed*)    printf 'block' ;;
+		*)          printf 'unknown' ;;
+	esac
+}
+# 线路档位：**按实测**判断，别去猜门户字段。
+# 为什么不用门户状态判断：实测 acct 为空是本科门户的常态 —— 各项功能全正常时它也是空的，
+# 拿它当"围墙花园"的判据会误报（我自己就先误报过一次）。
+line_tier() {
+	if https_out; then printf '正常（HTTPS 可用）'; return 0; fi
+	case "$(probe_one 8080)" in
+		open)    printf '只封了 443（HTTP/DNS 正常，隧道 11010 可能还活着）' ;;
+		block)   printf '⚠️ 白名单受限：只放行 80/53，HTTPS 与隧道(11010) 一起废' ;;
+		*)       printf '443 不通，且 8080 探测没结论（再看 --probe）' ;;
+	esac
+}
 # 出站 443 通不通（不依赖 DNS，按 IP 打，任何状态码都算通）。
 # 本校实测会**临时丢**这个方向的 443：HTTPS 全挂、门户与 HTTP 照常，
 # 还会把 AdGuardHome 的 DoH 上游拖成 30 秒超时 → 全屋 DNS 归零。
 # 只做观测：留条时间线，下次"突然断网"能直接对上号。
 https_out() {
 	local c
-	c="$(curl -sk -m 6 -o /dev/null -w '%{http_code}' https://223.5.5.5/ 2>/dev/null)"
+	c="$(curl -sk -m 6 -o /dev/null -w '%{http_code}' https://${PROBE_HOST:-223.5.5.5}/ 2>/dev/null)"
 	case "$c" in ''|000) return 1 ;; *) return 0 ;; esac
 }
 # 外网通不通。★ 顺序有讲究：本校校园网把 ICMP 挡了，`ping 223.5.5.5` 从来不通，
@@ -613,27 +635,27 @@ show_log() {	# 只看本脚本留的健康日志
 # 还是"整条线路被扔进了白名单模式"。后者是大问题（门户里 acct 为空就是它的特征），
 # 而且会让隧道（11010）与 HTTPS 一起废掉。
 probe_out() {
-	local p o
-	info "出站端口策略探测（目标 223.5.5.5，按 IP 访问，不受 DNS 影响）"
+	local p tier
+	info "出站端口策略探测（目标 ${PROBE_HOST:-223.5.5.5}，按 IP 访问，不受 DNS 影响）"
 	if [ "$PING_TARGET" != "-" ] && ping -c 1 -W 2 "$PING_TARGET" >/dev/null 2>&1; then
 		printf '  ICMP      : 通\n'
 	else
-		printf '  ICMP      : 不通（本校常态，单独不能说明问题）\n'
+		printf '  ICMP      : 不通（本校常挡，单独不能说明问题）\n'
 	fi
 	for p in ${PROBE_PORTS:-80 443 8080 8443 8888 2052 11010}; do
-		o="$(curl -v -m 4 -o /dev/null "http://223.5.5.5:$p/" 2>&1)"
-		case "$o" in
-			*onnected*) printf '  TCP %-5s : 放行（TCP 连上了）\n' "$p" ;;
-			*refused*)  printf '  TCP %-5s : 放行（对面没服务＝包出去了）\n' "$p" ;;
-			*timed*)    printf '  TCP %-5s : **被挡**（超时，包被丢）\n' "$p" ;;
-			*)          printf '  TCP %-5s : 结果不明（%s）\n' "$p" "$(printf '%s' "$o" | tail -1)" ;;
+		case "$(probe_one "$p")" in
+			open)    printf '  TCP %-5s : 放行\n' "$p" ;;
+			block)   printf '  TCP %-5s : **被挡**（超时，包被丢）\n' "$p" ;;
+			*)       printf '  TCP %-5s : 结果不明\n' "$p" ;;
 		esac
 	done
+	tier="$(line_tier)"
+	info "档位判定（按实测，不看门户字段）：$tier"
 	info "怎么读："
-	info "  只有 80 / 53 通        → 线路被扔进「白名单/受限」状态：HTTPS、隧道(11010) 一起废"
-	info "                           门户里 acct 为空、logined=1 正是这个状态的特征"
-	info "  只有 443 被挡          → 单纯封 HTTPS，HTTP 与隧道正常"
-	info "  都通                   → 正常"
+	info "  只有 80 / 53 通   → 白名单受限：HTTPS 与隧道(11010) 一起废，重认证无效"
+	info "  只有 443 被挡     → 单纯封 HTTPS，HTTP 与隧道正常"
+	info "  都通              → 正常"
+	info "  ★ 别拿门户的 acct 是否为空当判据 —— 实测它在本门户常态就是空的（正常时也空）"
 }
 
 # ── 门户会话状态 / 注销 ─────────────────────────────────────────────
@@ -803,23 +825,21 @@ show_status() {
 		printf '出站 443 : 通 ✅\n'
 	else
 		printf '出站 443 : 不通 ❌（HTTPS 全挂；门户/HTTP/DNS 照常，别误判成认证掉了）\n'
-		printf '           → 先看下面"门户会话"：acct 空就是围墙花园状态，用 --relogin 修\n'
+		printf '           线路档位：%s\n' "$(line_tier)"
+		printf '           先别急着重认证（实测无效）；用 --probe 看全貌、--relogin 清残留会话\n'
 	fi
-	# 门户会话：acct 为空 + logined=1 = 网关把这条线路当"未认证访客"，只放行 80/53。
-	# 这时 HTTPS 与隧道全废，而且**重认证没用**（login.php 见 logined=1 直接返回、不重绑），
-	# 必须先注销残留会话（门户 JS 里的 api/logoff.php）再登录。
+	# 门户会话：**只做记录，不下结论**。
+	# 实测教训：acct 为空是本科门户的常态 —— 各项功能全正常时它照样是空的，
+	# 拿它当"围墙花园"的判据会误报（我自己就先误报了一次）。
+	# 真正的判据是"实测哪些端口能出去"，也就是上面的「线路档位」和 --probe。
 	ps="$(portal_state 2>/dev/null)" || ps=''
 	if [ -z "$ps" ]; then
 		printf '门户会话 : 查不到（$PORTAL 打不开？）\n'
 	else
 		pl="${ps%%|*}"; rest="${ps#*|}"; pa="${rest%%|*}"; psl="${rest#*|}"
-		if [ "$pl" = 1 ] && [ -z "$pa" ]; then
-			printf '门户会话 : logined=1 acct=（空）session=%s\n' "$psl"
-			printf '           → ⚠️ IP 在线但**没绑账号**＝网关只给围墙花园（实测只放行 80/53）：\n'
-			printf '             HTTPS、隧道(11010) 全废，重认证无效 → sh %s --relogin\n' "$SELF_INSTALL"
-		else
-			printf '门户会话 : logined=%s acct=%s session=%s\n' "$pl" "${pa:-（空）}" "$psl"
-		fi
+		printf '门户会话 : logined=%s acct=%s session=%s' "$pl" "${pa:-（空）}" "$psl"
+		[ "$pl" = 1 ] && [ -z "$pa" ] && printf '（acct 空是本门户常态，不代表故障）'
+		printf '\n'
 	fi
 	printf '时钟     : %s' "$(date '+%F %T %Z')"
 	sk="$(clock_skew 2>/dev/null)" || sk=''
