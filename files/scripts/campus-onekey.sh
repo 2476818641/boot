@@ -194,9 +194,11 @@ probe_word() { case "$1" in open) printf '放行' ;; block) printf '被挡（超
 line_tier() {
 	if https_out; then printf '正常（HTTPS 可用）'; return 0; fi
 	if tunnel_up; then
-		printf '⚠️ 出站 443 被挡（HTTPS 全挂），但 EasyTier 隧道还活着 → 只封了 HTTPS'
+		# 隧道还活着 = 它是**限制开始之前**就建好的（实测：限制期间新建连接全失败，
+		# 但已建立的流会一直活着）。这时能靠 --https-route 把 443 塞进隧道。
+		printf '⚠️ 新建到 443 的连接被挡（HTTPS 全挂），但隧道还活着（限制前建好的）→ 可用 --https-route 把 443 塞进隧道'
 	else
-		printf '⚠️ 出站 443 被挡，且 EasyTier 隧道没起（可能一起被挡，也可能本来没开）'
+		printf '⚠️ 受限状态：实测新建到 443、11010、STUN 端口的连接都建不起来（只有 80/53 通）—— 隧道也只能在限制开始前建好'
 	fi
 }
 # 出站 443 通不通（不依赖 DNS，按 IP 打，任何状态码都算通）。

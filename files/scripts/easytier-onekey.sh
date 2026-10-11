@@ -30,6 +30,8 @@
 #   sh easytier-onekey.sh --clear             # 清空全部端口转发
 #   sh easytier-onekey.sh --pause             # 暂停隧道（停服务 + 取消自启，配置全留）—— 排查校园网限制时做 A/B
 #   sh easytier-onekey.sh --resume            # 恢复隧道（--pause 的反操作）
+#   sh easytier-onekey.sh --exit-node 192.168.10.2   # 指定出口节点（家里那台，需开 --enable-exit-node）；`-` 清空
+#   sh easytier-onekey.sh --https-route on|off       # ★只把 443 走隧道（校园网限制新连接时绕 HTTPS），失败自动撤销
 #   DRY_RUN=1 sh easytier-onekey.sh --ports tcp/25565    # 只打印要改什么
 #
 # 为什么要 --pause：一个 7×24 常连的加密隧道（还带 STUN 打洞、11010-11013 一堆监听）
@@ -89,7 +91,7 @@ run() {
 }
 
 # 用法＝文件头那段注释（只有一个定义点，改行数时只改这里）
-usage() { sed -n '2,63p' "$0"; }
+usage() { sed -n '2,65p' "$0"; }
 # -h 不依赖 uci：在电脑 / 其它机器上也能读用法
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
 
@@ -107,6 +109,7 @@ et_list() {  # 清掉旧的再用 add_list —— init 只认 list 型，set 会
 lan_ip()  { uci -q get network.lan.ipaddr 2>/dev/null || echo 192.168.1.1; }
 lan_net() { local l; l="$(lan_ip)"; printf '%s.0/24' "${l%.*}"; }
 tun_dev() { local t; t="$(et_get tunname)"; [ -n "$t" ] && echo "$t" || echo tun0; }
+tun_up()  { ip link show "$(tun_dev)" >/dev/null 2>&1; }
 toml_ipv4() { [ -f "$TOML" ] && sed -n 's/^ipv4 *= *"\([^"]*\)".*/\1/p' "$TOML" 2>/dev/null | head -1; }
 # 本机虚拟 IP：uci 优先，其次现成的 config.toml（手工删过 uci 也别让人重填），最后给默认
 cur_ipaddr() {
@@ -182,13 +185,15 @@ EOF
 }
 
 toml_body() {   # 只往 stdout 写文件内容；要提示人一律用 warn（走 stderr，别污染 $(...)）
-	local name secret ip tun peers proxy iid np
+	local name secret ip tun peers proxy iid np exitn
 	name="$(et_get network_name)"
 	secret="$(et_get network_secret)"
 	ip="$(cur_ipaddr)"
 	tun="$(tun_dev)"
 	peers="$(uci -q get easytier.@easytier[0].peeradd 2>/dev/null)"
 	proxy="$(uci -q get easytier.@easytier[0].proxy_network 2>/dev/null)"
+	# 出口节点（校园网限制新连接时，把 443 塞进隧道、由出口节点替我们连外网）
+	exitn="$(uci -q get easytier.@easytier[0].exit_nodes 2>/dev/null)"
 	# instance_id 沿用旧文件里的，节点身份稳定一点（没有就现生成一个）
 	iid="$(sed -n 's/^instance_id *= *"\(.*\)"$/\1/p' "$TOML" 2>/dev/null | head -1)"
 	[ -n "$iid" ] || iid="$(cat /proc/sys/kernel/random/uuid 2>/dev/null)"
@@ -215,6 +220,14 @@ listeners = [
 network_name = "$name"
 network_secret = "$secret"
 EOF
+	# 出口节点（顶层字段，和 ipv4 同级）：目标不在虚拟网段内的包会被交给它去连。
+	# ★ 只在"校园网封了新连接、要用隧道绕 HTTPS"时才配；配合 --https-route 使用，
+	#   否则会变成"所有外网流量都走隧道"（连校园门户都会绕出去 → 认证会挂）。
+	if [ -n "$exitn" ]; then
+		printf 'exit_nodes = ['
+		for np in $exitn; do printf '"%s", ' "$np"; done
+		printf ']\n'
+	fi
 	if [ -n "$peers" ]; then
 		for np in $peers; do
 			np="$(norm_peer "$np")" || { warn "跳过看不懂的引导节点：$np"; continue; }
@@ -799,6 +812,132 @@ restart_et() {
 	fi
 }
 
+# ── 出口节点 + 把 443 塞进隧道（校园网限制新建连接时的绕过手段）──────────
+# 依据（用户实测）：校园网限制期间，**已建立的隧道不断、但新建到 443 的连接被丢**。
+#   隧道里跑流量不需要任何新的校园网连接 —— 真正去连 443 的是隧道另一头那台机器。
+# 所以：家里（有公网）那台开 --enable-exit-node，路由器这边写 exit_nodes + 策略路由，
+#   只把 dport 443 标记后送进 tun0，其余流量（含校园门户）照旧直连。
+# ★ exit_nodes 千万不能裸用：EasyTier 的判定是"目标不在虚拟网段就交给出口节点"，
+#   而校园门户 10.30.100.5 也不在虚拟网段 → 全走隧道会把认证搞挂。
+#   必须靠下面的策略路由把范围限死在 443。
+HTTPS_ROUTE_TABLE="${HTTPS_ROUTE_TABLE:-443}"
+HTTPS_ROUTE_MARK="${HTTPS_ROUTE_MARK:-0x443}"
+HTTPS_ROUTE_FILE="${HTTPS_ROUTE_FILE:-/etc/nftables.d/30-https-via-tunnel.nft}"
+
+do_exit_node() {	# --exit-node <虚拟IP> | --exit-node -（清空）
+	local ip="${1:-}"
+	if [ "$ip" = "-" ] || [ -z "$ip" ]; then
+		info "清掉出口节点配置"
+		et_list exit_nodes
+		run uci commit easytier
+		toml_write
+		say "    已清空 exit_nodes（--show 复核）"
+		return 0
+	fi
+	case "$ip" in
+		*[!0-9.]*|'') die "出口节点的虚拟 IP 看着不对：$ip（应为 192.168.x.x 这种）" ;;
+	esac
+	info "把 $ip 设为出口节点（它必须已经开了 --enable-exit-node）"
+	et_list exit_nodes "$ip"
+	run uci commit easytier
+	toml_write
+	say "    已写入 config.toml 的 exit_nodes = [\"$ip\"]"
+	say "    下一步：sh $0 --https-route on（只把 443 走隧道）"
+}
+
+https_route_apply() {	# 写入 nft 标记规则 + ip rule + 路由表
+	local tun; tun="$(tun_dev)"
+	mkdir -p "$(dirname "$HTTPS_ROUTE_FILE")"
+	cat > "$HTTPS_ROUTE_FILE" <<EOF
+# easytier-onekey.sh 生成：把 dport 443 标记出来，交给 --https-route 的策略路由
+# 目的：校园网限制新建连接时，只有 HTTPS 走隧道，其余流量（含校园门户）保持直连。
+chain https_via_tunnel_pre {
+    type filter hook prerouting priority mangle; policy accept;
+    iifname != "$tun" tcp dport 443 meta mark set $HTTPS_ROUTE_MARK
+}
+chain https_via_tunnel_out {
+    type filter hook output priority mangle; policy accept;
+    tcp dport 443 meta mark set $HTTPS_ROUTE_MARK
+}
+EOF
+	# 语法先过一遍：/etc/nftables.d/ 里语法错会让 fw4 reload 整体失败
+	{ echo 'table inet fw4 {'; cat "$HTTPS_ROUTE_FILE"; echo '}'; } > /tmp/.et-https.check.nft
+	if has nft && ! nft -c -f /tmp/.et-https.check.nft 2>/tmp/.et-https.err; then
+		rm -f "$HTTPS_ROUTE_FILE" /tmp/.et-https.check.nft
+		die "生成的 nft 规则语法不合法，已放弃（原配置未动）：
+$(sed 's/^/      /' /tmp/.et-https.err)"
+	fi
+	rm -f /tmp/.et-https.check.nft /tmp/.et-https.err
+	run fw4 reload
+	# 策略路由：带标记的包查独立表，该表默认走 tun0
+	run ip rule del fwmark "$HTTPS_ROUTE_MARK" lookup "$HTTPS_ROUTE_TABLE" 2>/dev/null || true
+	run ip rule add fwmark "$HTTPS_ROUTE_MARK" lookup "$HTTPS_ROUTE_TABLE"
+	run ip route replace default dev "$tun" table "$HTTPS_ROUTE_TABLE"
+	: > /tmp/.et-https-route.on 2>/dev/null
+	https_route_persist "$tun"
+}
+
+# 让策略路由在重启后自己回来：nft 规则本来就持久（/etc/nftables.d/ 会被 fw4 加载），
+# 但 ip rule / ip route 不会。用一个 hotplug 在网口事件时补回来（开机必然会触发）。
+https_route_persist() {
+	local tun="$1" hf=/etc/hotplug.d/iface/99-easytier-https-route
+	[ "$DRY_RUN" = 1 ] && { printf '    [dry-run] 写 %s（重启后自动补 ip rule/route）\n' "$hf"; return 0; }
+	mkdir -p "$(dirname "$hf")"
+	cat > "$hf" <<EOF
+#!/bin/sh
+# easytier-onekey.sh 生成：把"443 走隧道"的策略路由在开机后补回来
+# （nft 标记规则由 fw4 加载 /etc/nftables.d/30-https-via-tunnel.nft，不用管）
+[ -f /etc/easytier-https-route.on ] || exit 0
+ip link show $tun >/dev/null 2>&1 || exit 0
+ip rule show | grep -q "fwmark $HTTPS_ROUTE_MARK lookup $HTTPS_ROUTE_TABLE" || \\
+	ip rule add fwmark $HTTPS_ROUTE_MARK lookup $HTTPS_ROUTE_TABLE
+ip route replace default dev $tun table $HTTPS_ROUTE_TABLE 2>/dev/null
+EOF
+	chmod +x "$hf"
+	: > /etc/easytier-https-route.on 2>/dev/null
+}
+
+https_route_clear() {
+	run rm -f "$HTTPS_ROUTE_FILE" /etc/easytier-https-route.on /etc/hotplug.d/iface/99-easytier-https-route
+	run ip rule del fwmark "$HTTPS_ROUTE_MARK" lookup "$HTTPS_ROUTE_TABLE" 2>/dev/null || true
+	run ip route flush table "$HTTPS_ROUTE_TABLE" 2>/dev/null || true
+	run fw4 reload
+	rm -f /tmp/.et-https-route.on 2>/dev/null
+}
+
+do_https_route() {	# --https-route on|off
+	local act="${1:-on}" c
+	case "$act" in
+		on)
+			[ -n "$(uci -q get easytier.@easytier[0].exit_nodes 2>/dev/null)" ] || \
+				die "还没设出口节点：先 sh $0 --exit-node <出口节点的虚拟IP>"
+			tun_up || die "隧道没起来（$(tun_dev) 不存在）—— 先 --resume，或看 /tmp/easytier.log"
+			info "只把 dport 443 走隧道（标记 $HTTPS_ROUTE_MARK → 表 $HTTPS_ROUTE_TABLE → $(tun_dev)）"
+			https_route_apply
+			[ "$DRY_RUN" = 1 ] && return 0
+			sleep 2
+			# ★ 安全网：立刻验证。不通就**当场撤销**，绝不留下把 HTTPS 搞挂的残留配置
+			c="$(curl -sk -m 8 -o /dev/null -w '%{http_code}' "https://${PROBE_HOST_REMOTE:-223.5.5.5}/" 2>/dev/null)"
+			case "$c" in
+				''|000)
+					warn "    验证失败：HTTPS 仍不通（$c）→ **自动撤销**（避免把 HTTPS 彻底搞挂）"
+					https_route_clear
+					warn "    请检查：出口节点那台是否真的开了 --enable-exit-node、是否在同一房间、"
+					warn "            以及 easytier-cli route 里能否看到它的路由"
+					return 1 ;;
+				*)  say "    HTTPS 通了 ✅（HTTP $c）—— 现在只有 443 走隧道，其余流量仍直连"
+				    say "    关掉：sh $0 --https-route off" ;;
+			esac
+			;;
+		off)
+			info "撤销 443 走隧道"
+			https_route_clear
+			say "    已恢复为全部直连（--status 复核）"
+			;;
+		*) die "用法：--https-route on|off" ;;
+	esac
+}
+
 # ── 暂停 / 恢复隧道（排查校园网限制用的 A/B 开关）────────────────────
 # 背景：一个 7×24 常连的加密隧道 + STUN 打洞 + 11010-11013 多个监听，
 # 在校园网的反代理系统眼里是最典型的特征。想验证"断网是不是它招来的"，
@@ -815,15 +954,28 @@ do_pause() {
 }
 do_resume() {
 	info "恢复 EasyTier 隧道"
+	# ★ uci 的 enabled 必须是 1，否则 `/etc/init.d/easytier start` 只打印 "start.."、
+	#   什么都不做 —— 该 init 的逻辑是 `[ "$(uci -q get …enabled)" = "1" ] && start_et`。
+	#   实测踩过：--pause（stop+disable）之后 --resume 起不来，症状就是
+	#   "start.. 之后没有 tun0、/tmp/easytier.log 是空的、easytier-cli 连不上 15888"。
+	if [ "$(et_get enabled)" != "1" ]; then
+		warn "    uci 里 easytier.…enabled=$(et_get enabled)（不是 1）→ init 不会真的启动，先修回来"
+		et_set enabled '1'
+		run uci commit easytier
+	fi
 	run /etc/init.d/easytier enable
 	run /etc/init.d/easytier start
 	[ "$DRY_RUN" = 1 ] && return 0
-	sleep 10
+	sleep 12
 	if ip link show "$(tun_dev)" >/dev/null 2>&1; then
 		say "    隧道设备 $(ip -br addr show "$(tun_dev)" 2>/dev/null | tr -s ' ') 已就绪 ✓"
 	else
-		warn "    没看到隧道设备 $(tun_dev) —— 看 /tmp/easytier.log 最后几行"
-		tail -n 8 /tmp/easytier.log 2>/dev/null | sed 's/^/      /'
+		warn "    没看到隧道设备 $(tun_dev)。按这个顺序查："
+		warn "      1) uci show easytier | grep -E 'enabled|etcmd'   # enabled 必须 1、etcmd 必须 config"
+		warn "      2) wc -c /tmp/easytier.log                      # 0 字节 = init 根本没进 start_et"
+		warn "      3) sh $0 --toml                                 # 重新生成并校验 config.toml"
+		log="$(tail -n 8 /tmp/easytier.log 2>/dev/null)"
+		[ -n "$log" ] && printf '%s\n' "$log" | sed 's/^/      /' || warn "      （/tmp/easytier.log 是空的，印证了第 2 条）"
 	fi
 	info "对端："
 	has easytier-cli && easytier-cli peer 2>/dev/null | sed 's/^/      /'
@@ -874,6 +1026,8 @@ case "${1:-}" in
 	--toml)  MODE=toml;  shift ;;
 	--clear) MODE=clear; shift ;;
 	--pause) MODE=pause; shift ;;
+	--exit-node) MODE=exitnode; shift ;;
+	--https-route) MODE=httpsroute; shift ;;
 	--resume) MODE=resume; shift ;;
 	-h|--help) usage; exit 0 ;;
 	--*) die "未知参数：$1" ;;
@@ -895,6 +1049,8 @@ case "$MODE" in
 	node)   do_node "$ARG1"; restart_et; exit 0 ;;
 	room)   do_room; restart_et; exit 0 ;;
 	pause)  do_pause; exit 0 ;;
+	exitnode) do_exit_node "$ARG1"; exit 0 ;;
+	httpsroute) do_https_route "$ARG1"; exit $? ;;
 	resume) do_resume; exit 0 ;;
 	astral) do_astral "$ARG1"; restart_et; exit 0 ;;
 	toml)   toml_write; restart_et; exit 0 ;;
