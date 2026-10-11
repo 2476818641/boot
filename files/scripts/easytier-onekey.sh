@@ -28,7 +28,13 @@
 #   sh easytier-onekey.sh --show              # 看现状（模式 / 配置 / 转发 / 对端 / 实际启动参数）
 #   sh easytier-onekey.sh --toml              # 手改过 config.toml 后：校验 + 重启
 #   sh easytier-onekey.sh --clear             # 清空全部端口转发
+#   sh easytier-onekey.sh --pause             # 暂停隧道（停服务 + 取消自启，配置全留）—— 排查校园网限制时做 A/B
+#   sh easytier-onekey.sh --resume            # 恢复隧道（--pause 的反操作）
 #   DRY_RUN=1 sh easytier-onekey.sh --ports tcp/25565    # 只打印要改什么
+#
+# 为什么要 --pause：一个 7×24 常连的加密隧道（还带 STUN 打洞、11010-11013 一堆监听）
+# 在校园网的反代理系统眼里是最典型的特征。如果"时不时断网"只在开着隧道时出现，
+# 停掉它观察 1~2 天就能定性；平时只在联机时开，暴露窗口会小得多。
 #
 # ★ 配置是怎么生效的（换机器 / 重刷固件后必看）
 #   luci-app-easytier 的 /etc/init.d/easytier 按 uci 的 etcmd 三选一：
@@ -83,7 +89,7 @@ run() {
 }
 
 # 用法＝文件头那段注释（只有一个定义点，改行数时只改这里）
-usage() { sed -n '2,57p' "$0"; }
+usage() { sed -n '2,63p' "$0"; }
 # -h 不依赖 uci：在电脑 / 其它机器上也能读用法
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
 
@@ -793,6 +799,36 @@ restart_et() {
 	fi
 }
 
+# ── 暂停 / 恢复隧道（排查校园网限制用的 A/B 开关）────────────────────
+# 背景：一个 7×24 常连的加密隧道 + STUN 打洞 + 11010-11013 多个监听，
+# 在校园网的反代理系统眼里是最典型的特征。想验证"断网是不是它招来的"，
+# 就把隧道停掉观察 1~2 天（其它一切不动），再用 campus-onekey.sh --log 看还有没有断。
+do_pause() {
+	info "暂停 EasyTier 隧道（配置全部保留，随时 --resume 回来）"
+	run /etc/init.d/easytier stop
+	run /etc/init.d/easytier disable
+	info "现在隧道的暴露面归零。观察 1~2 天，然后对比这三条："
+	info "  sh /etc/campus-onekey.sh --log      # 校园网侧还有没有再断（状态变化日志）"
+	info "  sh /etc/campus-onekey.sh --probe    # 端口 / 会话表 / 上游 DNS"
+	info "  sh /etc/campus-onekey.sh --status   # 四行联网判定"
+	info "恢复：sh $0 --resume"
+}
+do_resume() {
+	info "恢复 EasyTier 隧道"
+	run /etc/init.d/easytier enable
+	run /etc/init.d/easytier start
+	[ "$DRY_RUN" = 1 ] && return 0
+	sleep 10
+	if ip link show "$(tun_dev)" >/dev/null 2>&1; then
+		say "    隧道设备 $(ip -br addr show "$(tun_dev)" 2>/dev/null | tr -s ' ') 已就绪 ✓"
+	else
+		warn "    没看到隧道设备 $(tun_dev) —— 看 /tmp/easytier.log 最后几行"
+		tail -n 8 /tmp/easytier.log 2>/dev/null | sed 's/^/      /'
+	fi
+	info "对端："
+	has easytier-cli && easytier-cli peer 2>/dev/null | sed 's/^/      /'
+}
+
 show_all() {
 	local etm pid cmdline
 	say "启动模式（uci etcmd）"
@@ -837,6 +873,8 @@ case "${1:-}" in
 	--show)  MODE=show;  shift ;;
 	--toml)  MODE=toml;  shift ;;
 	--clear) MODE=clear; shift ;;
+	--pause) MODE=pause; shift ;;
+	--resume) MODE=resume; shift ;;
 	-h|--help) usage; exit 0 ;;
 	--*) die "未知参数：$1" ;;
 esac
@@ -856,6 +894,8 @@ case "$MODE" in
 		;;
 	node)   do_node "$ARG1"; restart_et; exit 0 ;;
 	room)   do_room; restart_et; exit 0 ;;
+	pause)  do_pause; exit 0 ;;
+	resume) do_resume; exit 0 ;;
 	astral) do_astral "$ARG1"; restart_et; exit 0 ;;
 	toml)   toml_write; restart_et; exit 0 ;;
 	ports)  load_conf; do_ports "$ARG1"; do_common; exit 0 ;;
