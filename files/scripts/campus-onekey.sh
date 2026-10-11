@@ -98,17 +98,35 @@ info() { [ "$QUIET" = 1 ] || printf '\033[1;32m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m[!] %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[1;31m[!] %s\033[0m\n' "$*" >&2; exit 1; }
 log()  { logger -t campus-onekey "$*" 2>/dev/null || true; }
-# 状态变化才写日志（logd 环形缓冲只有 16 KB 左右，每 5 分钟刷屏会把历史冲掉）。
-# 用 /tmp 下的标记文件记住"上一次是什么状态"（tmpfs，重启即清空 —— 重启后重新记一次也无妨）。
+# 事件日志：既进 syslog，也**自己落一个文件**。
+# 为什么要自己落文件：logd 的环形缓冲只有 ~16 KB，而 crond 每跑一次任务就写一行
+# （每 5 分钟一条 "cmd /etc/campus-onekey.sh --auto"），加上心跳，一天就能把缓冲冲干净 ——
+# 实测踩过：443 红了几小时，--log 里却只剩 cron 噪音，什么都看不到。
+# 做 1~2 天的 A/B 实验（--pause 隧道）全靠这个文件，所以不能再依赖 syslog 缓冲。
+EVENTS="${EVENTS:-/etc/campus-events.log}"
+event() {
+	log "$*"
+	[ "$DRY_RUN" = 1 ] && return 0
+	printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$EVENTS" 2>/dev/null || true
+	# 只留最近 500 行，别让它无限长（每天最多几十行）
+	if [ -f "$EVENTS" ]; then
+		_l="$(wc -l < "$EVENTS" 2>/dev/null || echo 0)"
+		if [ "${_l:-0}" -gt 500 ] 2>/dev/null; then
+			tail -n 300 "$EVENTS" > "$EVENTS.tmp" 2>/dev/null && mv -f "$EVENTS.tmp" "$EVENTS" 2>/dev/null
+		fi
+	fi
+}
+# 状态变化才写日志。用 /tmp 下的标记文件记住"上一次是什么状态"
+# （tmpfs，重启即清空 —— 重启后重新记一次也无妨）。
 log_state() {	# log_state <键> <异常时的日志内容>
 	[ -f "/tmp/.campus-state-$1" ] && return 0
 	: > "/tmp/.campus-state-$1" 2>/dev/null
-	log "$2"
+	event "$2"
 }
 log_state_clear() {	# log_state_clear <键> <恢复时的日志内容>：恢复正常时补一行，方便算持续多久
 	[ -f "/tmp/.campus-state-$1" ] || return 0
 	rm -f "/tmp/.campus-state-$1" 2>/dev/null
-	log "$2"
+	event "$2"
 }
 run()  { if [ "$DRY_RUN" = 1 ]; then printf '    [dry-run] %s\n' "$*"; else "$@"; fi; }
 has()  { command -v "$1" >/dev/null 2>&1; }
@@ -530,7 +548,7 @@ do_login() {
 			ret_in "$RET" "$RET_ACCEPT" && break
 			if [ "$STEP" = 1 ] && [ "$RET" = 4 ]; then
 				warn "    账号或密码不正确（ret=4 msg=$MSG）"
-				log "auth rejected: ret=4 (bad credentials, user=$CAMPUS_USER)"
+				event "认证被拒：账号或密码错（user=$CAMPUS_USER）"
 				AUTH_FATAL=1
 				return 1
 			fi
@@ -539,7 +557,7 @@ do_login() {
 				sleep "$RET_SLEEP"; continue
 			fi
 			warn "    认证被拒绝：$_path ret=$RET msg=$MSG"
-			log "auth rejected at $_path: ret=$RET msg=$MSG"
+			event "认证被拒：$_path ret=$RET msg=$MSG"
 			AUTH_FATAL=1
 			return 1
 		done
@@ -556,7 +574,7 @@ do_login() {
 	sleep 2
 	if online_wait; then
 		say "    认证成功 ✅"
-		log "auth ok (user=$CAMPUS_USER)"
+		event "认证成功（user=$CAMPUS_USER）"
 		return 0
 	fi
 	# 门户说成功、却还是上不了网 —— 必须分清是"校园网没放行"还是"本机 DNS 挂了"：
@@ -567,7 +585,7 @@ do_login() {
 		warn "        pgrep -f AdGuardHome || echo 'AGH 没在跑'"
 		warn "        nslookup www.baidu.com 127.0.0.1     # 超时/无响应就是这个原因"
 		warn "      应急恢复：sh $0 --dns-fallback（还不行再看 logread | grep -iE 'adguard|dnsmasq'）"
-		log "auth ok but local DNS broken (user=$CAMPUS_USER, tcp=$TCP_CODE)"
+		event "认证成功，但本机 DNS 不通（tcp=$TCP_CODE）"
 		return 0	# 认证本身是成功的 —— 返回 0，别让 cron 每 5 分钟反复重登
 	fi
 	warn "    提交了但外网还不通（ret=${LAST_RET:-?} msg=$LAST_MSG）"
@@ -641,13 +659,25 @@ show_log() {	# 只看本脚本留的健康日志
 	#   `logread -e PATTERN` 或 logread | grep。实测踩过：`logread -t campus-onekey | grep 443`
 	#   会把 AGH 那些历史 DoH 超时全带出来（几百行），看着像刚出事。
 	local n="${1:-40}"
-	info "campus-onekey 的健康日志（最近 $n 条；**没有输出就代表一切正常**）"
-	logread 2>/dev/null | grep -F 'campus-onekey' | tail -n "$n"
-	info "上面只会有这几类行："
-	info "  WARN 域名解析不通…   → 本机 DNS 挂了（--dns-fallback 应急）"
-	info "  WARN 出站 443 不通…  → 校园网临时丢 443（HTTPS 会全挂，门户/HTTP 照常）"
-	info "  WARN 本机时钟与门户差… → NTP 同步不上（--clock 校时）"
-	info "  时钟与门户差 Ns，已自动按门户校时 / already online / auth ok"
+	# 优先看我们自己的事件文件：它不受 logd 环形缓冲大小与 crond 噪音影响，
+	# 是"1~2 天 A/B 实验"唯一靠得住的记录（443 / 隧道 / DNS / 会话表 的状态变化都在里面）。
+	if [ -s "$EVENTS" ]; then
+		info "事件时间线（$EVENTS，最近 $n 条）—— 做 A/B 实验就靠这个："
+		tail -n "$n" "$EVENTS" | sed 's/^/  /'
+		info "（syslog 里最后 5 条，供对照）"
+		logread 2>/dev/null | grep -F 'campus-onekey' | tail -n 5 | sed 's/^/  /'
+	else
+		info "还没有事件记录（$EVENTS 是空的）—— --auto 跑起来后才会写"
+		info "（syslog 里最后 $n 条）"
+		logread 2>/dev/null | grep -F 'campus-onekey' | tail -n "$n" | sed 's/^/  /'
+	fi
+	info "这些行分别是什么意思："
+	info "  WARN 域名解析不通…    → 本机 DNS 挂了（--dns-fallback 应急）"
+	info "  WARN 出站 443 不通…   → 新建到 443 的连接被挡（HTTPS 全挂，门户/HTTP 照常）"
+	info "  …443 恢复             → 限制解除的时间点（和隧道起停并排看相关性）"
+	info "  WARN 连接表已用 …%    → 会话表快满：新连接会被丢、已有连接不断"
+	info "  隧道已建立 / 已断开   → EasyTier 的时间线（--pause 做 A/B 时看这个）"
+	info "  时钟与门户差 Ns，已自动按门户校时 / 心跳：在线正常（每小时一条）"
 }
 
 # ── 出站端口策略探测 ────────────────────────────────────────────────
@@ -737,7 +767,7 @@ do_logout() {	# 注销门户会话（把残留的"空账号在线"状态清掉�
 	ret="$(json_num "$resp" ret)"; msg="$(json_str "$resp" msg)"
 	say "    ${LOGOUT_PATH:-/api/logoff.php} → ret=${ret:-?} msg=${msg:-（空）}"
 	say "    原始响应：$(printf '%s' "$resp" | head -c 160)"
-	log "logoff: ret=${ret:-?} msg=${msg:-（空）} user=${CAMPUS_USER:-?}"
+	event "注销会话：ret=${ret:-?} msg=${msg:-（空）} user=${CAMPUS_USER:-?}"
 	case "${ret:-}" in
 		0|3|121|122) say "    注销已提交 ✅（接着 --relogin 重新登录）"; return 0 ;;
 		'') warn "    门户没返回 ret —— 接口/字段可能不对（看上面原始响应；raas.js 里搜 logoff）"; return 1 ;;
@@ -1156,7 +1186,15 @@ auto)
 		if tunnel_up; then log_state tunnel "EasyTier 隧道已建立（记录起点）"
 		else log_state_clear tunnel "EasyTier 隧道已断开"; fi
 		clock_auto
-		log "already online"; exit 0
+		# 心跳：**每小时最多一条**。原来每 5 分钟一条（288 条/天），
+		# 会把 logd 的 16 KB 缓冲和事件文件一起冲掉，恰恰盖住真正有用的状态行。
+		_hb="/tmp/.campus-hb-$(date +%Y%m%d%H)"
+		if [ ! -f "$_hb" ]; then
+			rm -f /tmp/.campus-hb-* 2>/dev/null
+			: > "$_hb" 2>/dev/null
+			event "心跳：在线正常（每小时一条）"
+		fi
+		exit 0
 	fi
 	do_login || exit 1
 	;;
