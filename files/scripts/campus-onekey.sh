@@ -655,7 +655,7 @@ show_log() {	# 只看本脚本留的健康日志
 # 还是"整条线路被扔进了白名单模式"。后者是大问题（门户里 acct 为空就是它的特征），
 # 而且会让隧道（11010）与 HTTPS 一起废掉。
 probe_out() {
-	local t tier
+	local t tier cc cm
 	info "出站端口检测（只测"对面确实在监听"的端口，否则结论没意义）"
 	if [ "$PING_TARGET" != "-" ] && ping -c 1 -W 2 "$PING_TARGET" >/dev/null 2>&1; then
 		printf '  ICMP                : 通\n'
@@ -664,6 +664,29 @@ probe_out() {
 	fi
 	printf '  TCP %-15s : %s\n' "$PROBE_HOST:80"  "$(probe_word "$(probe_one "$PROBE_HOST" 80)")"
 	printf '  TCP %-15s : %s\n' "$PROBE_HOST:443" "$(probe_word "$(probe_one "$PROBE_HOST" 443)")"
+	# 会话表：**"新连接失败、已有连接不断"就是这里满了的经典特征**
+	# （用户实测：晚上断、早上好、游戏不断 —— 夜间会话多、过期后自然恢复）
+	cc="$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null)"
+	cm="$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null)"
+	case "${cc:-}:${cm:-}" in
+		:*|*:) : ;;
+		*)
+			printf '  会话表 conntrack    : %s / %s' "$cc" "$cm"
+			if [ "$cm" -gt 0 ] 2>/dev/null && [ "$cc" -gt "$((cm * 8 / 10))" ] 2>/dev/null; then
+				printf ' ← ⚠️ 已用 %.0f%%，新连接会被丢！\n' "$(awk "BEGIN{print $cc*100/$cm}" 2>/dev/null)"
+			else
+				printf '\n'
+			fi ;;
+	esac
+	# 上游 DNS：直接问公网（绕开本机 AGH/dnsmasq 缓存）——
+	# "本机能解析"很可能只是缓存命中，不代表 DNS 出得去
+	if has nslookup; then
+		if nslookup www.qq.com "${PROBE_DNS:-223.5.5.5}" >/dev/null 2>&1; then
+			printf '  上游 DNS(%s)     : 通\n' "${PROBE_DNS:-223.5.5.5}"
+		else
+			printf '  上游 DNS(%s)     : 不通（本机能解析的话可能只是缓存）\n' "${PROBE_DNS:-223.5.5.5}"
+		fi
+	fi
 	printf '  EasyTier 隧道 (%s) : %s\n' "$(et_tun)" "$(tunnel_up && echo 在 || echo 不在)"
 	for t in ${PROBE_EXTRA:-}; do	# 自建 VPS 上开着的端口这样测，例如 PROBE_EXTRA='1.2.3.4:8443'
 		printf '  额外 %-16s : %s\n' "$t" "$(probe_word "$(probe_one "${t%%:*}" "${t##*:}")")"
@@ -753,6 +776,19 @@ perm_mac() {
 }
 wan_has_ip() { ip -4 -o addr show dev wan 2>/dev/null | grep -q 'inet '; }
 portal_reach() { curl -s -m 5 -o /dev/null "$PORTAL/" 2>/dev/null; }
+# 连接表用量：输出 "<count> <max> <pct>"；读不到返回非 0。
+# 为什么盯它：**"新连接失败、已有连接不断"是连接表满了的经典特征**
+# （实测：晚上断、早上好、游戏不断、DNS 还能解析 —— 夜间会话多，过期后自然恢复）。
+ct_stat() {
+	local c m
+	c="$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null)"
+	m="$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null)"
+	case "${c:-}:${m:-}" in
+		:*|*:) return 1 ;;
+	esac
+	[ "$m" -gt 0 ] 2>/dev/null || return 1
+	printf '%s %s %s' "$c" "$m" "$((c * 100 / m))"
+}
 
 do_new_mac() {
 	local sec mac ip4 new="${1:-}" i pm
@@ -966,6 +1002,16 @@ show_status() {
 		[ "$pl" = 1 ] && [ -z "$pa" ] && printf '（acct 空是本门户常态，不代表故障）'
 		printf '\n'
 	fi
+	# 连接表：新连接失败但已有连接不断 = 这里满了的经典特征（晚上断、早上好也吻合）
+	_ct="$(ct_stat 2>/dev/null)" || _ct=''
+	if [ -n "$_ct" ]; then
+		_c="${_ct%% *}"; _r="${_ct#* }"; _m="${_r%% *}"; _p="${_r##* }"
+		printf '会话表   : %s / %s（%s%%）' "$_c" "$_m" "$_p"
+		if [ "$_p" -gt 80 ] 2>/dev/null; then
+			printf ' ← ⚠️ 快满了：新连接会被丢（已有连接不受影响）'
+		fi
+		printf '\n'
+	fi
 	printf '时钟     : %s' "$(date '+%F %T %Z')"
 	sk="$(clock_skew 2>/dev/null)" || sk=''
 	if [ -z "$sk" ]; then
@@ -1093,6 +1139,17 @@ auto)
 		else log_state dns "WARN 域名解析不通（本机 dnsmasq/AdGuardHome 挂了？应急：sh $SELF_INSTALL --dns-fallback），但按 IP 的外网是通的"; fi
 		if https_out; then log_state_clear https "出站 443 恢复（HTTPS 又能用了）"
 		else log_state https "WARN 出站 443 不通（HTTPS 全挂；门户/HTTP/DNS 照常）—— 校园网侧封锁本线路的出站 443，不是认证问题，等它自己恢复"; fi
+		# 连接表用量：>80% 记一次（新连接失败/已有连接不断的头号嫌疑）
+		_ctp="$(ct_stat 2>/dev/null)" || _ctp=''
+		case "${_ctp:-}" in
+			'') : ;;
+			*) _pct="${_ctp##* }"
+			   if [ "$_pct" -gt 80 ] 2>/dev/null; then
+				log_state ct "WARN 连接表已用 ${_pct}%（${_ctp%% *}/${_ctp#* }）—— 新连接会被丢，检查谁在占：awk '{print \$4}' /proc/net/nf_conntrack | sort | uniq -c | sort -rn | head"
+			   else
+				log_state_clear ct "连接表恢复正常（新连接又能建了）"
+			   fi ;;
+		esac
 		clock_auto
 		log "already online"; exit 0
 	fi
