@@ -49,6 +49,11 @@ chain ttl_fix {
 
 chain ttl_fix_in {
     type filter hook prerouting priority mangle; policy accept;
-    iifname "wan" ip protocol tcp ip ttl 0-2 ip ttl set 64
-    iifname "wan" ip protocol udp ip ttl 0-2 ip ttl set 64
+    # ★ 上行接口名不写死 "wan"：改成"只要不是从 LAN 网桥进来的"就修。
+    #   为什么：把上行换成校园 WiFi（STA，接口名通常叫 wwan）时，
+    #   写死 iifname "wan" 会让这条规则失效 → 换 WiFi 后**全屋客户端的 HTTPS/游戏立刻全挂**
+    #   （客户端入站包 TTL 被网关改成 1，转发减 1 归零被丢），而路由器自己却没事 ——
+    #   这个"只有客户端坏"的现象我们踩过两次了。
+    iifname != { br-lan } ip protocol tcp ip ttl 0-2 ip ttl set 64
+    iifname != { br-lan } ip protocol udp ip ttl 0-2 ip ttl set 64
 }

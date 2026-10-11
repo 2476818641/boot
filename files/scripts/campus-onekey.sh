@@ -368,8 +368,11 @@ chain ttl_fix {
 
 chain ttl_fix_in {
     type filter hook prerouting priority mangle; policy accept;
-    iifname "wan" ip protocol tcp ip ttl 0-2 ip ttl set 64
-    iifname "wan" ip protocol udp ip ttl 0-2 ip ttl set 64
+    # ★ 上行接口不写死 wan：换成校园 WiFi 上行（STA，通常叫 wwan）时，
+    #   写死 iifname "wan" 会让这条规则失效 → 换 WiFi 后全屋客户端 HTTPS/游戏立刻全挂，
+    #   而路由器自己正常（这个"只有客户端坏"的坑我们踩过两次）。
+    iifname != { $lan } ip protocol tcp ip ttl 0-2 ip ttl set 64
+    iifname != { $lan } ip protocol udp ip ttl 0-2 ip ttl set 64
 }
 EOF
 }
