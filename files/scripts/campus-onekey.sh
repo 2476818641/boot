@@ -1150,6 +1150,11 @@ auto)
 				log_state_clear ct "连接表恢复正常（新连接又能建了）"
 			   fi ;;
 		esac
+		# 隧道起停也记一笔：日志里就能直接看出"断网"和"开着隧道"的相关性
+		# （用户实测：443 被挡期间隧道一直没断 —— 说明被挡的是"新连接"，
+		#   已建立的流不受影响；这也正是"隧道能当绕过手段"的原因）
+		if tunnel_up; then log_state tunnel "EasyTier 隧道已建立（记录起点）"
+		else log_state_clear tunnel "EasyTier 隧道已断开"; fi
 		clock_auto
 		log "already online"; exit 0
 	fi
